@@ -1,0 +1,52 @@
+import {
+  Limiter,
+  type AsyncAcquireResult,
+  type LimiterOptions,
+  type SyncAcquireResult,
+} from "../../Limiter.js";
+import { DelayedRejectStrategy } from "../DelayedRejectStrategy.js";
+import {
+  PartitionedStrategy,
+  type PartitionConfig,
+} from "../PartitionedStrategy.js";
+
+export function makePartitionedLimiter<
+  ContextT,
+  PartitionName extends string = string,
+>(options: {
+  partitionResolver: (context: ContextT) => PartitionName | undefined;
+  partitions: Record<PartitionName, PartitionConfig & { delayMs?: number }>;
+  limiter?: Omit<
+    LimiterOptions<ContextT, SyncAcquireResult>,
+    "acquireStrategy"
+  >;
+  maxConcurrentDelays?: number;
+}): Limiter<ContextT, AsyncAcquireResult> {
+  const limit = options.limiter?.limit ?? Limiter.makeDefaultLimit();
+  const delayByPartition = new Map<PartitionName, number>(
+    Object.entries(options.partitions).map(([name, cfg]) => [
+      name satisfies string as PartitionName,
+      (cfg as { delayMs?: number }).delayMs ?? 0,
+    ]),
+  );
+
+  return new Limiter<ContextT, AsyncAcquireResult>({
+    ...options.limiter,
+    limit,
+    acquireStrategy: new PartitionedStrategy<ContextT, PartitionName>({
+      partitionResolver: options.partitionResolver,
+      partitions: options.partitions,
+      initialLimit: limit.currentLimit,
+      metricRegistry: options.limiter?.metricRegistry,
+    }),
+    allotmentUnavailableStrategy: new DelayedRejectStrategy<ContextT>({
+      delayMsForContext(context) {
+        const partition = options.partitionResolver(context);
+        return partition === undefined
+          ? 0
+          : (delayByPartition.get(partition) ?? 0);
+      },
+      maxConcurrentDelays: options.maxConcurrentDelays,
+    }),
+  });
+}

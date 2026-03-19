@@ -1,0 +1,69 @@
+/**
+ * This is our canonical way to set compiler options for the type of strict
+ * checking that we want. In different contexts, we may override the _emit_
+ * settings (e.g., if we're using a bundler or when we're using project
+ * references), but the other compiler options should stay constant.
+ */
+ {
+  "compilerOptions": {
+    // Make every project composite by default, so that it can reference other
+    // projects efficiently. And for any project that might be _referenced by_
+    // other projects, we need to make sure it emits declarations + maps.
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // Key target + module system stuff to ensure sanity. These settings plus
+    // `"type": "module"` in package.json mean that: 1) the code we write is
+    // actually the code that will be output (e.g., no `import` -> `require`
+    // transpilation); 2) we'll have the best possible ESM support and ESM<->CJS
+    // interop (e.g., with support for `require("ESM")` if we have to make an
+    // explicit .cts file at some point); and 3) that we're writing in the most
+    // future-proof way. The downside is that the meaning of `import` in this
+    // package will be different than in other packages, but: 1) there are
+    // already module loading differences across our packages (e.g., between
+    // core and web, thanks to Webpack BS); and 2) module loading issues fail
+    // hard and early and can pretty quickly be fixed with guess-and-check, so
+    // this doesn't require devs to deeply understand the ESM vs CJS nuances.
+    "target": "ESNext",
+    "module": "nodenext",
+    "verbatimModuleSyntax": true,
+    "moduleResolution": "nodenext",
+
+    // Strictness (i.e., make things maximally strict)
+    "strict": true,
+    "allowUnreachableCode": false,
+    "noFallthroughCasesInSwitch": true,
+    "useDefineForClassFields": true,
+    "forceConsistentCasingInFileNames": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedIndexedAccess": true,
+    "useUnknownInCatchVariables": true,
+    "noUncheckedSideEffectImports": true,
+
+    // Ban syntax (like `enum`) that makes it harder to compile TS to JS,
+    // because that operation no longer involves just type annotation stripping,
+    // which forces the use of slower transpilers (e.g., tsc over swc; tsc-node
+    // over tsx). The TS team also considers these syntax additions as "regrets"
+    // in the language design (e.g., because enum is actually a reserved word in
+    // JS that TC39 might eventually want to use in a way that would conflict
+    // with TS). Cf. isolatedModules.
+    "erasableSyntaxOnly": true,
+
+    // Compilation performance
+    "incremental": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+
+    // Handle JS + JSON files.
+    "allowJs": true,
+    "checkJs": true,
+    "resolveJsonModule": true,
+
+    // Opt in to the deterministic type ordering algorithm that will become the
+    // default in TS 7.0. This surfaces any ordering-sensitive breakages now.
+    "stableTypeOrdering": true
+  }
+}

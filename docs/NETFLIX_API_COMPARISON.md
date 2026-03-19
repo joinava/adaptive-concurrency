@@ -1,0 +1,350 @@
+# Netflix Java `concurrency-limits` vs this TypeScript port
+
+This document catalogs API and architecture differences between Netflix's Java library and this project's TypeScript packages:
+
+- `adaptive-concurrency` (core)
+- `@adaptive-concurrency/http` (HTTP middleware integration)
+
+It is intended to help:
+
+- maintainers merge upstream Java changes into this codebase, and
+- users migrate from Java usage patterns to this TypeScript API.
+
+Reference Java repo: [Netflix/concurrency-limits](https://github.com/Netflix/concurrency-limits)
+
+---
+
+## 1. Repository and integration surface
+
+| Java (Netflix)                                                              | TypeScript (this repo)                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Multi-module Maven project (`concurrency-limits-core`, servlet, gRPC, etc.) | Monorepo with `packages/adaptive-concurrency` and `packages/http` |
+| Framework-specific servlet and gRPC integrations                            | HTTP middleware integration for Node/Express-style frameworks     |
+| Includes servlet filter and gRPC modules                                    | No gRPC package currently                                         |
+
+The TypeScript HTTP package is intentionally minimal and framework-agnostic, based on request/response shape rather than servlet APIs.
+
+---
+
+## 2. Core architectural differences
+
+### Java limiter class hierarchy -> one `Limiter` + strategies
+
+Java behavior is spread across classes/decorators:
+
+- `Limiter<ContextT>` interface
+- `AbstractLimiter<ContextT>`
+- `SimpleLimiter<ContextT>`
+- `AbstractPartitionedLimiter<ContextT>`
+- `BlockingLimiter<ContextT>`
+- `LifoBlockingLimiter<ContextT>`
+
+TypeScript uses one concrete `Limiter` class plus two extension points:
+
+- `AcquireStrategy<ContextT>`: decides slot allocation (semaphore, partitioned, etc.)
+- `AllotmentUnavailableStrategy<ContextT, ResultT>`: decides behavior when no slot is available
+
+This moves customization from subclassing to composition.
+
+### Blocking is a rejection strategy, not a wrapper limiter
+
+- Java: blocking behavior is typically added by wrapping a limiter (`BlockingLimiter.wrap(...)`, `LifoBlockingLimiter...build()`).
+- TypeScript: blocking behavior is configured via `Limiter` option `rejectionStrategy` (`FifoBlockingRejection`, `LifoBlockingRejection`).
+
+Because JavaScript is single-threaded, "blocking" means promise-based waiting, not thread blocking.
+
+### No `AbstractLimit` base class
+
+- Java limit implementations generally inherit from `AbstractLimit`.
+- TypeScript limit implementations directly implement `AdaptiveLimit` and commonly use `ListenerSet` for change listeners. This is more composition over inheritance.
+
+---
+
+## 3. Core contract mapping
+
+### `Limit` -> `AdaptiveLimit`
+
+| Java `Limit`                                  | TypeScript `AdaptiveLimit`                     |
+| --------------------------------------------- | ---------------------------------------------- |
+| `int getLimit()`                              | `currentLimit` getter                          |
+| `notifyOnChange(Consumer<Integer>)`           | `subscribe(listener, { signal? }): () => void` |
+| `onSample(startNs, rttNs, inflight, didDrop)` | `addSample(startMs, rttMs, inflight, didDrop)` |
+| nanosecond time units                         | fractional milliseconds                        |
+
+Time conversion is a key migration concern: Java nanoseconds vs TypeScript milliseconds.
+
+### `Limiter.Listener` -> `LimitAllotment`
+
+| Java                                | TypeScript                           |
+| ----------------------------------- | ------------------------------------ |
+| `Limiter.Listener` nested interface | top-level `LimitAllotment` interface |
+| `onSuccess()`                       | `reportSuccess()`                    |
+| `onIgnore()`                        | `reportIgnore()`                     |
+| `onDropped()`                       | `reportDropped()`                    |
+
+Semantics are equivalent: exactly one completion method should be called.
+
+### `Limiter` interface -> `Limiter` class
+
+| Java                                   | TypeScript                                                       |
+| -------------------------------------- | ---------------------------------------------------------------- |
+| functional interface                   | concrete class                                                   |
+| `acquire(context): Optional<Listener>` | `acquire(options?): LimitAllotment \| undefined \| Promise<...>` |
+| rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                        |
+| context passed positionally            | options object (`{ context, signal? }`)                          |
+
+TypeScript `AcquireOptions` adds `signal?: AbortSignal`.
+
+### Bypass configuration
+
+- Java uses builder-level bypass resolvers/helpers (combined OR-style).
+- TypeScript `LimiterOptions` has `bypassResolver?: (context) => boolean`.
+- Bypassed calls return a no-op allotment and do not affect inflight/limit sampling.
+
+---
+
+## 4. New TypeScript-only core APIs
+
+### `withLimiter(limiter)` and `RunResult`
+
+No direct Java equivalent.
+
+- `withLimiter(limiter)` creates `limited`, then call `limited(fn)` or `limited(options, fn)` to acquire and scope execution.
+- Callback returns `RunResult`: `success(value)`, `ignore(value)`, or `dropped(error)`.
+- If no allotment is available, returns `QuotaNotAvailable` and does not invoke `fn`.
+- Callback receives `{ context, signal }` from `AcquireOptions`.
+- If `fn` throws/rejects unexpectedly, `limited()` calls `reportIgnore()` and rethrows, except `AdaptiveTimeoutError`, which is treated as dropped (`reportDropped()`) and rethrown.
+
+### Other TS-only helpers/types
+
+- `whenAcquireSettled(...)` for handling sync/async acquire uniformly
+- `SyncLimiter` compatibility interface
+- `LimiterState` (`{ limit, inflight }`) passed to acquire strategies
+- `ListenerSet`
+- exported run helpers/types (`RunResult`, `RunSuccess`, `RunIgnore`, `RunDropped`)
+
+---
+
+## 5. Limiter implementation mapping
+
+| Java                         | TypeScript                                                       |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `SimpleLimiter`              | `Limiter` with default `SemaphoreStrategy`                       |
+| `AbstractPartitionedLimiter` | `PartitionedStrategy` plugged into `Limiter.acquireStrategy`     |
+| `BlockingLimiter`            | `FifoBlockingRejection` plugged into `Limiter.rejectionStrategy` |
+| `LifoBlockingLimiter`        | `LifoBlockingRejection` plugged into `Limiter.rejectionStrategy` |
+
+Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`, which currently returns `new GradientLimit()`, **not a `VegasLimit`**, which is what the Java code used.
+
+### `PartitionedStrategy` notes
+
+- Partition guarantees and burst semantics are preserved: partitions have guaranteed share but can exceed it when global inflight is below the global limit.
+- `partitionResolver` is a single function; ordered fallback is left to the caller.
+- `PartitionedStrategy` accepts a second type parameter `PartitionName` (default `string`) so `partitions`, the resolver return type, and `getPartition`’s `name` can be narrowed (e.g. `"read" | "write"`).
+- Unknown partition behavior is retained.
+- `PartitionConfig` is only **`percent`** (no `rejectDelay`). Java-style **sleep-then-reject** uses **`DelayedRejectStrategy`**: implement `delayMsForContext` with the same partition resolution as `partitionResolver` and your own map/table of delay ms per partition name.
+- Java's `maxDelayedThreads` maps to **`DelayedRejectStrategy`**'s `maxConcurrentDelays` (default 100).
+- `PartitionedStrategy` requires `initialLimit`.
+- `PartitionedStrategy` itself throws if no partitions are provided; `HttpLimiterBuilder` falls back to non-partitioned `Limiter` when no partitions are configured.
+
+### Blocking strategy behavior
+
+| Aspect                                     | Java                                           | TypeScript                                                                                                |
+| ------------------------------------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| FIFO blocking                              | `BlockingLimiter` wrapper                      | `FifoBlockingRejection`                                                                                   |
+| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `LifoBlockingRejection`                                                                                   |
+| Delay then reject (`partitionRejectDelay`) | `Thread.sleep` in `AbstractPartitionedLimiter` | `DelayedRejectStrategy` (`delayMsForContext`, `maxConcurrentDelays`); delays are not on `PartitionConfig` |
+| Blocking mechanism                         | thread wait/latch primitives                   | Promise queues                                                                                            |
+| Cancellation                               | interrupt-based                                | `AbortSignal` support                                                                                     |
+
+Additional details:
+
+- `FifoBlockingRejection.timeout`: milliseconds; default 1 hour; max 1 hour.
+- `LifoBlockingRejection.backlogTimeout`: milliseconds or function `(context) => number`.
+- `DelayedRejectStrategy`: awaits a delay then returns no allotment (does not call `retry`); unlike FIFO blocking, it does not wait for capacity.
+
+---
+
+## 6. Limit algorithm surface differences
+
+### Builders -> constructors/options objects
+
+Java fluent builders (`newBuilder()...build()`) are replaced with TypeScript constructors with options objects.
+
+Examples:
+
+- Java `VegasLimit.newBuilder()...build()` -> TypeScript `new VegasLimit({...})`
+- Java `AIMDLimit.newBuilder()...build()` -> TypeScript `new AIMDLimit({...})`
+- Java `WindowedLimit.newBuilder().build(delegate)` -> TypeScript `new WindowedLimit(delegate, options?)`
+- Java `FixedLimit.of(x)` -> TypeScript `new FixedLimit(x)`
+- Java `SettableLimit.startingAt(x)` -> TypeScript `new SettableLimit(x)`
+
+### Time unit normalization
+
+All algorithm time inputs/options in TypeScript use milliseconds (not Java nanoseconds + `TimeUnit` conversions), including:
+
+- `AdaptiveLimit.addSample(...)` timing values
+- `AIMDLimitOptions.timeout`
+- `WindowedLimitOptions.minWindowTimeMs` / `maxWindowTimeMs`
+- limiter clock values (default `performance.now()` semantics)
+
+### `VegasLimit`
+
+- Policy hooks are grouped under `policy`:
+  - `alpha`, `beta`, `threshold`, `increase`, `decrease`
+- All policy functions are `(limit: number) => number`.
+- Java deprecated builder methods (`alpha(...)`, `beta(...)`, `tolerance(...)`, `backoffRatio(...)`) are not carried over.
+- Java `Log10RootIntFunction` is not a standalone class in TS; equivalent behavior is an internal `log10Scale` helper.
+
+### `Gradient2Limit` naming
+
+- Implementation/export name in TS is `GradientLimit`.
+- Option type is `Gradient2LimitOptions`.
+- `queueSize` supports `number | ((concurrency: number) => number)`.
+- `getLastRtt()` and `getRttNoLoad()` return milliseconds.
+
+### `WindowedLimit` and sample windows
+
+- TS constructor takes delegate directly: `new WindowedLimit(delegate, options?)`.
+- TS `SampleWindow` is immutable (`addSample` returns new `SampleWindow`).
+- Properties use readonly fields (`candidateRttMs`, `trackedRttMs`, `maxInFlight`, `sampleCount`, `dropped`) instead of Java getter methods.
+- Factory style is function-based (`sampleWindowFactory?: () => SampleWindow`).
+- TS adds `createPercentileSampleWindow(...)` in addition to average windows.
+
+### `FixedLimit`, `SettableLimit`, `TracingLimitDecorator`
+
+- `FixedLimit` and `SettableLimit` implement `AdaptiveLimit` directly.
+- `SettableLimit.setLimit(...)` has no synchronization concerns (single-threaded runtime model).
+- `TracingLimitDecorator` logs via `console.debug` instead of SLF4J.
+
+### Gradient v1
+
+- Java has both `GradientLimit` (v1) and `Gradient2Limit` (v2).
+- This TypeScript port only exposes the v2-style algorithm surface under the name `GradientLimit`.
+
+---
+
+## 7. Executor differences
+
+Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now. Its role is covered by `withLimiter(limiter)`:
+
+- Java `execute(Runnable)` style maps to wrapping your async work in `withLimiter(limiter)`.
+- Acquire failures are represented by `QuotaNotAvailable` (instead of executor-specific rejection exceptions).
+- Drop signaling can be done via `dropped(err)` return values, or by throwing `AdaptiveTimeoutError`.
+- No JVM thread-pool abstraction is provided in core TypeScript APIs.
+
+---
+
+## 8. Metrics API differences
+
+| Aspect               | Java                                         | TypeScript                                            |
+| -------------------- | -------------------------------------------- | ----------------------------------------------------- |
+| Sample listener type | nested `MetricRegistry.SampleListener`       | `DistributionMetric`                                  |
+| Sample methods       | multiple boxed-number variants               | single `addSample(value: number)`                     |
+| Counter type         | nested                                       | top-level `Counter`                                   |
+| `counter` tags       | varargs name/value pairs                     | object map `Record<string,string>`                    |
+| `distribution` tags  | varargs strings                              | varargs strings                                       |
+| `gauge`              | `Supplier<Number>` (registration often void) | `() => number` supplier; returns `GaugeMetric` handle |
+| no-op registry       | singleton class                              | `NoopMetricRegistry` object constant                  |
+
+Shared metric **name** strings used by `Limiter`, `PartitionedStrategy`, and adaptive limits (e.g. `limit`, `call`, `inflight`, `min_rtt`) live in the `MetricIds` constant, co-exported from `MetricRegistry.ts` with `MetricRegistry` / `NoopMetricRegistry`.
+
+Java deprecated metric registration APIs (`registerDistribution`, `registerGauge`, `registerGuage`) are not present in TS.
+
+---
+
+## 9. Statistics / measurement mapping
+
+`Measurement` -> `StreamingStatistic`:
+
+| Java                               | TypeScript                         |
+| ---------------------------------- | ---------------------------------- |
+| `add(Number)`                      | `addSample(number)`                |
+| `get()`                            | `currentValue` getter              |
+| `reset()`                          | `reset()`                          |
+| `update(Function<Number, Number>)` | `update((current:number)=>number)` |
+
+Implementation mapping:
+
+| Java                 | TypeScript                          |
+| -------------------- | ----------------------------------- |
+| `ExpAvgMeasurement`  | `ExpMovingAverage`                  |
+| `MinimumMeasurement` | `MinimumValue`                      |
+| -                    | `MostRecentValue` (new TS addition) |
+
+---
+
+## 10. HTTP package differences (servlet-style vs Node middleware)
+
+| Java                            | TypeScript                                               |
+| ------------------------------- | -------------------------------------------------------- |
+| `ConcurrencyLimitServletFilter` | `concurrencyLimitMiddleware(...)`                        |
+| `ServletLimiterBuilder`         | `HttpLimiterBuilder`                                     |
+| servlet request model           | minimal `HttpRequest` shape (`method`, `url`, `headers`) |
+| HTTP 429 overload responses     | default 429 (`throttleStatus` configurable)              |
+
+`HttpLimiterBuilder` supports:
+
+- partitioning by header
+- partitioning by path mapping function
+- partitioning by method
+- bypass by header/method/custom predicate
+
+If several `partitionBy*` methods are used, `build()` merges them **in registration order** into a **single** `partitionResolver` (first non-null/undefined name wins) before constructing `PartitionedStrategy`—the strategy itself always takes one resolver function; ordered fallback is either composed here or implemented manually when constructing `PartitionedStrategy` directly.
+
+Java servlet helpers without direct built-in equivalents (e.g. parameter/attribute/principal-specific builders) should be implemented via custom resolver/predicate logic in TS.
+
+---
+
+## 11. Removed or not-ported Java items
+
+- `LimiterRegistry` convenience abstraction is not present.
+- Standalone `Log10RootIntFunction` class is not present.
+- Java gRPC integration modules are not ported in this repo.
+
+---
+
+## 12. New items without Java equivalents
+
+- `withLimiter(limiter)`
+- `RunResult` + `success/ignore/dropped`
+- `QuotaNotAvailable` sentinel
+- `whenAcquireSettled(...)`
+- `SyncLimiter` interface
+- `LimiterState` strategy input
+- `AcquireStrategy` / `AllotmentUnavailableStrategy` public extension points
+- `ListenerSet`
+- `createPercentileSampleWindow(...)`
+- `MostRecentValue`
+- broad `AbortSignal` support in acquire/rejection/subscribe APIs
+- `squareRoot(...)` and `squareRootWithBaseline(...)` helpers
+- `AdaptiveTimeoutError`, `isAdaptiveTimeoutError(...)`
+
+---
+
+## 13. Migration checklist
+
+1. Replace `Optional<Limiter.Listener>` with `LimitAllotment | undefined` (or promise thereof).
+2. Rename listener methods: `onSuccess/onIgnore/onDropped` -> `reportSuccess/reportIgnore/reportDropped`.
+3. Replace `Limit` API usage with `AdaptiveLimit` (`getLimit`/`notifyOnChange`/`onSample` -> `currentLimit`/`subscribe`/`addSample`).
+4. Convert nanosecond logic to milliseconds.
+5. Replace builder/decorator constructions with `new Limiter({...})` plus strategies.
+6. Replace `BlockingLimiter`/`LifoBlockingLimiter` wrapping with rejection strategies.
+7. For partitioned limiting, pass a single `partitionResolver` in the `PartitionedStrategy` constructor options (compose multiple Java-style resolvers yourself, or use `HttpLimiterBuilder`, which does this at `build()`).
+8. Prefer `withLimiter(limiter)` for scoped acquire/complete flows where appropriate.
+
+---
+
+## 14. Upstream merge guide (maintainers)
+
+When upstream Java commits change behavior, likely TS touchpoints are:
+
+- listener lifecycle/acquire semantics -> `Limiter.ts`, `LimitAllotment.ts`
+- partition logic -> `limiter/PartitionedStrategy.ts`
+- blocking behavior -> `limiter/FifoBlockingRejection.ts`, `limiter/LifoBlockingRejection.ts`
+- Java partition reject delay -> `limiter/DelayedRejectStrategy.ts` (optional; compose with `delayMsForContext`)
+- algorithm math -> files under `limit/`
+- metrics tagging/counters -> `MetricRegistry.ts` (`MetricIds`) + limiter/strategy call sites
+- servlet integration deltas -> `packages/http` (or new integration package work)
+
+Because this port factors behavior into strategies, a Java change in `SimpleLimiter` vs `AbstractPartitionedLimiter` may map to the same TypeScript `Limiter` with different options rather than new classes.
