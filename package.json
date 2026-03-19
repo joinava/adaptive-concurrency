@@ -1,0 +1,21 @@
+{
+  "name": "adaptive-concurrency",
+  "version": "1.0.0",
+  "description": "A TypeScript port of Netflix's concurrency-limits package.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.32.1",
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
