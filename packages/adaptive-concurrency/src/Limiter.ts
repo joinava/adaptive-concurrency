@@ -66,9 +66,9 @@ export interface AcquireStrategy<ContextT> {
 
 /**
  * Determines what happens when a request is rejected by the
- * {@link AcquireStrategy}. The type parameter `ResultT` flows through to
- * {@link Limiter.acquire}'s return type, enabling the type system to
- * distinguish sync limiters (no promise) from async/blocking ones.
+ * {@link AcquireStrategy} (e.g. queue the caller, reject immediately, or block
+ * until a slot is available). Implementations must return an
+ * {@link AcquireResult}, which is always a `Promise`.
  */
 export interface AllotmentUnavailableStrategy<ContextT> {
   /**
