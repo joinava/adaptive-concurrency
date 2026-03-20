@@ -1,18 +1,17 @@
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { LimitAllotment } from "../LimitAllotment.js";
+import { describe, it } from "node:test";
+import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
+  AcquireResult,
   AllotmentUnavailableStrategy,
-  AsyncAcquireResult,
-  SyncAcquireResult,
-} from "../Limiter.js";
+} from "../../Limiter.js";
 import { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 import { DelayedThenBlockingRejection } from "./DelayedThenBlockingRejection.js";
 
 describe("DelayedThenBlockingRejection", () => {
   it("applies delay before delegating to blocking strategy", async () => {
     let delegateCalledAt = -1;
-    const blocking: AllotmentUnavailableStrategy<string, AsyncAcquireResult> = {
+    const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
         delegateCalledAt = performance.now();
         return Promise.resolve(undefined);
@@ -28,14 +27,17 @@ describe("DelayedThenBlockingRejection", () => {
     });
 
     const start = performance.now();
-    await strategy.onAllotmentUnavailable("a", () => undefined);
+    await strategy.onAllotmentUnavailable("a", async () => undefined);
     const elapsed = delegateCalledAt - start;
-    assert.ok(elapsed >= 25, `expected delay before delegate, got ${elapsed}ms`);
+    assert.ok(
+      elapsed >= 25,
+      `expected delay before delegate, got ${elapsed}ms`,
+    );
   });
 
-  it("forwards onAllotmentReleased to blocking strategy", () => {
+  it("forwards onAllotmentReleased to blocking strategy", async () => {
     let releaseCalls = 0;
-    const blocking: AllotmentUnavailableStrategy<string, AsyncAcquireResult> = {
+    const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
         return Promise.resolve(undefined);
       },
@@ -51,23 +53,23 @@ describe("DelayedThenBlockingRejection", () => {
       blockingStrategy: blocking,
     });
 
-    strategy.onAllotmentReleased();
+    await strategy.onAllotmentReleased();
     assert.equal(releaseCalls, 1);
   });
 
   it("returns delegate allotment result after delay", async () => {
     const allotment: LimitAllotment = {
-      reportSuccess() {},
-      reportIgnore() {},
-      reportDropped() {},
+      async releaseAndRecordSuccess() {},
+      async releaseAndIgnore() {},
+      async releaseAndRecordDropped() {},
     };
 
-    const blocking: AllotmentUnavailableStrategy<string, AsyncAcquireResult> = {
+    const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable(
         _context: string,
-        retry: (context: string) => SyncAcquireResult,
+        retry: (context: string) => AcquireResult,
       ) {
-        return Promise.resolve(retry("a") ?? allotment);
+        return retry("a").then((value) => value ?? allotment);
       },
       onAllotmentReleased() {},
     };
@@ -79,7 +81,10 @@ describe("DelayedThenBlockingRejection", () => {
       blockingStrategy: blocking,
     });
 
-    const out = await strategy.onAllotmentUnavailable("a", () => undefined);
+    const out = await strategy.onAllotmentUnavailable(
+      "a",
+      async () => undefined,
+    );
     assert.equal(out, allotment);
   });
 });

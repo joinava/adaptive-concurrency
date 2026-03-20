@@ -1,24 +1,20 @@
 import {
   Limiter,
-  type AsyncAcquireResult,
   type LimiterOptions,
 } from "../../Limiter.js";
 import {
   LifoBlockingRejection,
   type LifoBlockingRejectionOptions,
-} from "../LifoBlockingRejection.js";
+} from "../allocation-unavailable-strategies/LifoBlockingRejection.js";
 
 export function makeLifoBlockingLimiter<ContextT = void>(
   options: {
     backlogSize?: number;
     backlogTimeout?: LifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
-    limiter?: Omit<
-      LimiterOptions<ContextT, AsyncAcquireResult>,
-      "allotmentUnavailableStrategy"
-    >;
+    limiter?: Omit<LimiterOptions<ContextT>, "allotmentUnavailableStrategy">;
   } = {},
-): Limiter<ContextT, AsyncAcquireResult> {
-  return new Limiter<ContextT, AsyncAcquireResult>({
+): Limiter<ContextT> {
+  return new Limiter<ContextT>({
     ...options.limiter,
     allotmentUnavailableStrategy: new LifoBlockingRejection<ContextT>({
       backlogSize: options.backlogSize,

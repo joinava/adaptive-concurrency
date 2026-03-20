@@ -4,19 +4,16 @@ export type { LimitAllotment } from "./LimitAllotment.js";
 export {
   Limiter,
   SemaphoreStrategy,
-  whenAcquireSettled,
   withLimiter,
   type AcquireOptions,
   type AcquireResult,
   type AcquireStrategy,
   type AllotmentUnavailableStrategy,
-  type AsyncAcquireResult,
   type LimitedFunction,
   type LimiterOptions,
   type LimiterState,
   type RunCallbackArgs,
-  type SyncAcquireResult,
-  type SyncLimiter,
+  type MaybePromise,
 } from "./Limiter.js";
 export { ListenerSet } from "./ListenerSet.js";
 export {
@@ -31,6 +28,7 @@ export {
   AdaptiveTimeoutError,
   dropped,
   ignore,
+  isRunResult,
   isAdaptiveTimeoutError,
   QuotaNotAvailable,
   success,
@@ -77,16 +75,16 @@ export * from "./limiter/factories/index.js";
 export {
   PartitionedStrategy,
   type PartitionConfig,
-} from "./limiter/PartitionedStrategy.js";
+} from "./limiter/acquire-strategies/PartitionedStrategy.js";
 
 // Rejection strategies
 export {
   DelayedRejectStrategy,
   type DelayedRejectStrategyOptions,
-} from "./limiter/DelayedRejectStrategy.js";
-export { DelayedThenBlockingRejection } from "./limiter/DelayedThenBlockingRejection.js";
-export { FifoBlockingRejection } from "./limiter/FifoBlockingRejection.js";
+} from "./limiter/allocation-unavailable-strategies/DelayedRejectStrategy.js";
+export { DelayedThenBlockingRejection } from "./limiter/allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
+export { FifoBlockingRejection } from "./limiter/allocation-unavailable-strategies/FifoBlockingRejection.js";
 export {
   LifoBlockingRejection,
   type LifoBlockingRejectionOptions,
-} from "./limiter/LifoBlockingRejection.js";
+} from "./limiter/allocation-unavailable-strategies/LifoBlockingRejection.js";

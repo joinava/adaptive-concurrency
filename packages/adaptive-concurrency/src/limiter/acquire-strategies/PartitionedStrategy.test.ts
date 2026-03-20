@@ -1,9 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Limiter } from "../Limiter.js";
+import { Limiter } from "../../Limiter.js";
 import { PartitionedStrategy } from "./PartitionedStrategy.js";
-import { FixedLimit } from "../limit/FixedLimit.js";
-import { SettableLimit } from "../limit/SettableLimit.js";
+import { FixedLimit } from "../../limit/FixedLimit.js";
+import { SettableLimit } from "../../limit/SettableLimit.js";
 
 function makePartitionedLimiter<
   ContextT,
@@ -27,7 +27,7 @@ function makePartitionedLimiter<
 }
 
 describe("PartitionedStrategy", () => {
-  it("should allocate limits to partitions based on percentage", () => {
+  it("should allocate limits to partitions based on percentage", async () => {
     const limiter = makePartitionedLimiter<string>({
       limit: new FixedLimit(10),
       partitionResolver: (ctx) => ctx,
@@ -39,14 +39,14 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = limiter.acquire({ context: "a" });
+      const l = await limiter.acquire({ context: "a" });
       if (l) listeners.push(l);
     }
 
     assert.ok(listeners.length <= 10);
   });
 
-  it("should allow excess capacity to be used by any partition (bursting)", () => {
+  it("should allow excess capacity to be used by any partition (bursting)", async () => {
     const limiter = makePartitionedLimiter<string>({
       limit: new FixedLimit(10),
       partitionResolver: (ctx) => ctx,
@@ -58,14 +58,14 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = limiter.acquire({ context: "a" });
+      const l = await limiter.acquire({ context: "a" });
       if (l) listeners.push(l);
     }
 
     assert.equal(listeners.length, 10, "Should use full global limit when partition is alone");
   });
 
-  it("should enforce partition limits when global limit is exceeded", () => {
+  it("should enforce partition limits when global limit is exceeded", async () => {
     const limiter = makePartitionedLimiter<string>({
       limit: new FixedLimit(10),
       partitionResolver: (ctx) => ctx,
@@ -77,24 +77,24 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 3; i++) {
-      const l = limiter.acquire({ context: "a" });
+      const l = await limiter.acquire({ context: "a" });
       assert.ok(l, `Should acquire a[${i}]`);
       listeners.push(l!);
     }
     for (let i = 0; i < 7; i++) {
-      const l = limiter.acquire({ context: "b" });
+      const l = await limiter.acquire({ context: "b" });
       assert.ok(l, `Should acquire b[${i}]`);
       listeners.push(l!);
     }
 
-    const extraA = limiter.acquire({ context: "a" });
+    const extraA = await limiter.acquire({ context: "a" });
     assert.equal(extraA, undefined, "Should reject a when its partition limit is reached");
 
-    const extraB = limiter.acquire({ context: "b" });
+    const extraB = await limiter.acquire({ context: "b" });
     assert.equal(extraB, undefined, "Should reject b when its partition limit is reached");
   });
 
-  it("should release capacity when allotment completes", () => {
+  it("should release capacity when allotment completes", async () => {
     const limiter = makePartitionedLimiter<string>({
       limit: new FixedLimit(2),
       partitionResolver: (ctx) => ctx,
@@ -104,19 +104,19 @@ describe("PartitionedStrategy", () => {
       },
     });
 
-    const l1 = limiter.acquire({ context: "a" })!;
-    const l2 = limiter.acquire({ context: "b" })!;
+    const l1 = (await limiter.acquire({ context: "a" }))!;
+    const l2 = (await limiter.acquire({ context: "b" }))!;
     assert.ok(l1 && l2);
 
-    assert.equal(limiter.acquire({ context: "a" }), undefined);
+    assert.equal(await limiter.acquire({ context: "a" }), undefined);
 
-    l1.reportSuccess();
+    await l1.releaseAndRecordSuccess();
 
-    const l3 = limiter.acquire({ context: "a" });
+    const l3 = await limiter.acquire({ context: "a" });
     assert.ok(l3, "Should acquire after release");
   });
 
-  it("should update partition limits when total limit changes", () => {
+  it("should update partition limits when total limit changes", async () => {
     const limit = new SettableLimit(10);
     const limiter = makePartitionedLimiter<string>({
       limit,
@@ -129,18 +129,18 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = limiter.acquire({ context: i % 2 === 0 ? "a" : "b" });
+      const l = await limiter.acquire({ context: i % 2 === 0 ? "a" : "b" });
       if (l) listeners.push(l);
     }
     assert.equal(listeners.length, 10);
 
     limit.setLimit(20);
 
-    const extra = limiter.acquire({ context: "a" });
+    const extra = await limiter.acquire({ context: "a" });
     assert.ok(extra, "Should acquire after limit increase");
   });
 
-  it("should support bypass with partitioned limiter", () => {
+  it("should support bypass with partitioned limiter", async () => {
     const limiter = makePartitionedLimiter<string>({
       limit: new FixedLimit(1),
       partitionResolver: (ctx) => ctx,
@@ -150,12 +150,12 @@ describe("PartitionedStrategy", () => {
       bypassResolver: (ctx) => ctx === "bypass",
     });
 
-    const l1 = limiter.acquire({ context: "a" })!;
+    const l1 = (await limiter.acquire({ context: "a" }))!;
     assert.ok(l1);
 
-    assert.equal(limiter.acquire({ context: "a" }), undefined);
+    assert.equal(await limiter.acquire({ context: "a" }), undefined);
 
-    const bypass = limiter.acquire({ context: "bypass" });
+    const bypass = await limiter.acquire({ context: "bypass" });
     assert.ok(bypass, "Bypass should work when limit exceeded");
   });
 

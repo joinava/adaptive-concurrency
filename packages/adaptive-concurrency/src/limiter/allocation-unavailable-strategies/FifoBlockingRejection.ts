@@ -1,9 +1,8 @@
-import type { LimitAllotment } from "../LimitAllotment.js";
+import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
   AllotmentUnavailableStrategy,
-  AsyncAcquireResult,
-  SyncAcquireResult,
-} from "../Limiter.js";
+  AcquireResult,
+} from "../../Limiter.js";
 
 type Waiter = () => void;
 
@@ -19,7 +18,7 @@ const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
  */
 export class FifoBlockingRejection<
   ContextT,
-> implements AllotmentUnavailableStrategy<ContextT, AsyncAcquireResult> {
+> implements AllotmentUnavailableStrategy<ContextT> {
   private readonly timeout: number;
   private readonly waiters: Array<Waiter> = [];
 
@@ -41,7 +40,7 @@ export class FifoBlockingRejection<
 
   onAllotmentUnavailable(
     _context: ContextT,
-    retry: (context: ContextT) => SyncAcquireResult,
+    retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
   ): Promise<LimitAllotment | undefined> {
     return this.acquireAsync(_context, retry, signal);
@@ -56,7 +55,7 @@ export class FifoBlockingRejection<
 
   private async acquireAsync(
     context: ContextT,
-    retry: (context: ContextT) => SyncAcquireResult,
+    retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
   ): Promise<LimitAllotment | undefined> {
     const deadline = performance.now() + this.timeout;
@@ -71,7 +70,7 @@ export class FifoBlockingRejection<
         return undefined;
       }
 
-      const allotment = retry(context);
+      const allotment = await retry(context);
       if (allotment) {
         return allotment;
       }

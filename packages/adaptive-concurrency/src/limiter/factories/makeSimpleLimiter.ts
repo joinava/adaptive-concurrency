@@ -2,17 +2,13 @@ import {
   Limiter,
   SemaphoreStrategy,
   type LimiterOptions,
-  type SyncAcquireResult,
 } from "../../Limiter.js";
 
 export function makeSimpleLimiter<ContextT = void>(
-  options: Omit<
-    LimiterOptions<ContextT, SyncAcquireResult>,
-    "acquireStrategy"
-  > = {},
-): Limiter<ContextT, SyncAcquireResult> {
+  options: Omit<LimiterOptions<ContextT>, "acquireStrategy"> = {},
+): Limiter<ContextT> {
   const limit = options.limit ?? Limiter.makeDefaultLimit();
-  return new Limiter<ContextT, SyncAcquireResult>({
+  return new Limiter<ContextT>({
     ...options,
     limit,
     acquireStrategy: new SemaphoreStrategy(limit.currentLimit),

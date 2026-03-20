@@ -10,7 +10,7 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     });
     const allotment = await limiter.acquire({ context: "a" });
     assert.ok(allotment);
-    allotment!.reportSuccess();
+    await allotment!.releaseAndRecordSuccess();
   });
 
   it("serves most recently queued request first", async () => {
@@ -23,20 +23,20 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     assert.ok(first);
 
     const order: string[] = [];
-    const w1 = limiter.acquire({ context: "oldest" }).then((a) => {
+    const w1 = limiter.acquire({ context: "oldest" }).then(async (a) => {
       if (a) {
         order.push("oldest");
-        a.reportSuccess();
+        await a.releaseAndRecordSuccess();
       }
     });
-    const w2 = limiter.acquire({ context: "newest" }).then((a) => {
+    const w2 = limiter.acquire({ context: "newest" }).then(async (a) => {
       if (a) {
         order.push("newest");
-        a.reportSuccess();
+        await a.releaseAndRecordSuccess();
       }
     });
 
-    first!.reportSuccess();
+    await first!.releaseAndRecordSuccess();
     await Promise.all([w1, w2]);
 
     assert.deepEqual(order, ["newest", "oldest"]);
@@ -72,7 +72,7 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     const overflow = await limiter.acquire({ context: "c" });
     assert.equal(overflow, undefined);
 
-    first!.reportSuccess();
+    await first!.releaseAndRecordSuccess();
     assert.ok(await inBacklog);
   });
 

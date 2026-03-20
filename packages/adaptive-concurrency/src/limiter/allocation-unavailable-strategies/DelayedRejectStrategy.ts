@@ -1,9 +1,8 @@
-import type { LimitAllotment } from "../LimitAllotment.js";
+import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
   AllotmentUnavailableStrategy,
-  AsyncAcquireResult,
-  SyncAcquireResult,
-} from "../Limiter.js";
+  AcquireResult,
+} from "../../Limiter.js";
 
 export interface DelayedRejectStrategyOptions<ContextT> {
   /**
@@ -29,7 +28,7 @@ export interface DelayedRejectStrategyOptions<ContextT> {
  */
 export class DelayedRejectStrategy<
   ContextT,
-> implements AllotmentUnavailableStrategy<ContextT, AsyncAcquireResult> {
+> implements AllotmentUnavailableStrategy<ContextT> {
   private readonly delayMsForContext: (context: ContextT) => number;
   private readonly maxConcurrentDelays: number;
   private concurrentDelays = 0;
@@ -45,7 +44,7 @@ export class DelayedRejectStrategy<
 
   onAllotmentUnavailable(
     context: ContextT,
-    _retry: (context: ContextT) => SyncAcquireResult,
+    _retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
   ): Promise<LimitAllotment | undefined> {
     return this.run(context, signal);

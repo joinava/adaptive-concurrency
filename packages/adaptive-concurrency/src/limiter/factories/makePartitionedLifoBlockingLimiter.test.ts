@@ -25,20 +25,20 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     assert.ok(first);
 
     const order: string[] = [];
-    const oldWaiter = limiter.acquire({ context: "a" }).then((a) => {
+    const oldWaiter = limiter.acquire({ context: "a" }).then(async (a) => {
       if (a) {
         order.push("old");
-        a.reportSuccess();
+        await a.releaseAndRecordSuccess();
       }
     });
-    const newWaiter = limiter.acquire({ context: "a" }).then((a) => {
+    const newWaiter = limiter.acquire({ context: "a" }).then(async (a) => {
       if (a) {
         order.push("new");
-        a.reportSuccess();
+        await a.releaseAndRecordSuccess();
       }
     });
 
-    setTimeout(() => first!.reportSuccess(), 60);
+    setTimeout(() => first!.releaseAndRecordSuccess(), 60);
     await Promise.all([oldWaiter, newWaiter]);
 
     assert.deepEqual(order, ["new", "old"]);
@@ -76,7 +76,7 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     const overflow = await limiter.acquire({ context: "a" });
     assert.equal(overflow, undefined);
 
-    first!.reportSuccess();
+    await first!.releaseAndRecordSuccess();
     assert.ok(await inBacklog);
   });
 
@@ -107,7 +107,7 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     assert.ok(first);
 
     const waiting = limiter.acquire({ context: "a" });
-    setTimeout(() => first!.reportSuccess(), 10);
+    setTimeout(() => first!.releaseAndRecordSuccess(), 10);
 
     const start = performance.now();
     const second = await waiting;
