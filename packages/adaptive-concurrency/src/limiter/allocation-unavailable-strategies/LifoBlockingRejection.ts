@@ -1,9 +1,8 @@
-import type { LimitAllotment } from "../LimitAllotment.js";
+import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
   AllotmentUnavailableStrategy,
-  AsyncAcquireResult,
-  SyncAcquireResult,
-} from "../Limiter.js";
+  AcquireResult,
+} from "../../Limiter.js";
 
 interface Waiter<ContextT> {
   context: ContextT;
@@ -32,12 +31,12 @@ export interface LifoBlockingRejectionOptions<ContextT> {
  */
 export class LifoBlockingRejection<
   ContextT,
-> implements AllotmentUnavailableStrategy<ContextT, AsyncAcquireResult> {
+> implements AllotmentUnavailableStrategy<ContextT> {
   private readonly backlogSize: number;
   private readonly getBacklogTimeout: (context: ContextT) => number;
   private readonly backlog: Array<Waiter<ContextT>> = [];
 
-  private retry: ((context: ContextT) => SyncAcquireResult) | undefined;
+  private retry: ((context: ContextT) => AcquireResult) | undefined;
 
   constructor(options: LifoBlockingRejectionOptions<ContextT> = {}) {
     this.backlogSize = options.backlogSize ?? 100;
@@ -49,7 +48,7 @@ export class LifoBlockingRejection<
 
   onAllotmentUnavailable(
     context: ContextT,
-    retry: (context: ContextT) => SyncAcquireResult,
+    retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
   ): Promise<LimitAllotment | undefined> {
     this.retry = retry;
@@ -61,11 +60,11 @@ export class LifoBlockingRejection<
     return this.waitForBacklog(context, signal);
   }
 
-  onAllotmentReleased(): void {
+  async onAllotmentReleased(): Promise<void> {
     if (this.backlog.length === 0 || !this.retry) return;
 
     const waiter = this.backlog[0]!;
-    const allotment = this.retry(waiter.context);
+    const allotment = await this.retry(waiter.context);
     if (allotment) {
       this.backlog.shift();
       waiter.resolve(allotment);

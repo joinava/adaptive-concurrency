@@ -1,22 +1,21 @@
-import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import { GradientLimit } from "./limit/GradientLimit.js";
+import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import type { LimitAllotment } from "./LimitAllotment.js";
 import type { Counter, MetricRegistry } from "./MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "./MetricRegistry.js";
 import {
+  isRunResult,
   isAdaptiveTimeoutError,
   QuotaNotAvailable,
   type RunResult,
 } from "./RunResult.js";
 
-export type SyncAcquireResult = LimitAllotment | undefined;
-export type AsyncAcquireResult = Promise<LimitAllotment | undefined>;
+export type MaybePromise<T> = T | Promise<T>;
 
 /**
- * Union of all possible acquire return types. Useful for code that must handle
- * both sync and async limiters generically.
+ * Acquire is async-only.
  */
-export type AcquireResult = SyncAcquireResult | AsyncAcquireResult;
+export type AcquireResult = Promise<LimitAllotment | undefined>;
 
 export interface AcquireOptions<ContextT = void> {
   context?: ContextT;
@@ -47,13 +46,16 @@ export interface AcquireStrategy<ContextT> {
    * When `true`, the strategy has reserved capacity for one inflight unit; when
    * `false`, an allotment was not available.
    */
-  tryAcquireAllotment(context: ContextT, state: LimiterState): boolean;
+  tryAcquireAllotment(
+    context: ContextT,
+    state: LimiterState,
+  ): MaybePromise<boolean>;
 
   /**
    * Called when an acquired allotment completes (success, ignore, or drop).
    * Perform any cleanup (e.g. increment permits, release a partition slot).
    */
-  onAllotmentReleased(context: ContextT): void;
+  onAllotmentReleased(context: ContextT): MaybePromise<void>;
 
   /**
    * Called when the adaptive limit changes. The strategy can react
@@ -64,14 +66,11 @@ export interface AcquireStrategy<ContextT> {
 
 /**
  * Determines what happens when a request is rejected by the
- * {@link AcquireStrategy}. The type parameter `ResultT` flows through to
- * {@link Limiter.acquire}'s return type, enabling the type system to
- * distinguish sync limiters (no promise) from async/blocking ones.
+ * {@link AcquireStrategy} (e.g. queue the caller, reject immediately, or block
+ * until a slot is available). Implementations must return an
+ * {@link AcquireResult}, which is always a `Promise`.
  */
-export interface AllotmentUnavailableStrategy<
-  ContextT,
-  ResultT extends SyncAcquireResult | AsyncAcquireResult,
-> {
+export interface AllotmentUnavailableStrategy<ContextT> {
   /**
    * Called when the acquire strategy cannot allocate an allotment for a
    * request.
@@ -85,32 +84,29 @@ export interface AllotmentUnavailableStrategy<
    */
   onAllotmentUnavailable(
     context: ContextT,
-    retry: (context: ContextT) => SyncAcquireResult,
+    retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
-  ): ResultT;
+  ): AcquireResult;
 
   /**
    * Called whenever any allotment is released (success, ignore, or drop).
    * Blocking strategies use this to wake queued waiters.
    */
-  onAllotmentReleased(): void;
+  onAllotmentReleased(): MaybePromise<void>;
 }
 
 // ---------------------------------------------------------------------------
 // Limiter options
 // ---------------------------------------------------------------------------
 const NOOP_ALLOTMENT: LimitAllotment = {
-  reportSuccess() {},
-  reportIgnore() {},
-  reportDropped() {},
+  async releaseAndRecordSuccess() {},
+  async releaseAndIgnore() {},
+  async releaseAndRecordDropped() {},
 };
 
 let idCounter = 0;
 
-export interface LimiterOptions<
-  ContextT,
-  RejResultT extends SyncAcquireResult | AsyncAcquireResult = SyncAcquireResult,
-> {
+export interface LimiterOptions<ContextT> {
   limit?: AdaptiveLimit;
 
   /**
@@ -139,35 +135,23 @@ export interface LimiterOptions<
    * Strategy that decides what happens when the acquire strategy rejects a
    * request. When omitted, rejected requests immediately receive `undefined`.
    */
-  allotmentUnavailableStrategy?: AllotmentUnavailableStrategy<
-    ContextT,
-    RejResultT
-  >;
+  allotmentUnavailableStrategy?: AllotmentUnavailableStrategy<ContextT>;
 }
 
 /**
  * Concurrency limiter with pluggable strategies for gating decisions and
  * rejection handling.
  *
- * When no rejection strategy is provided, `acquire()` returns synchronously
- * (`LimitAllotment | undefined`). When a blocking rejection strategy is
- * configured, `acquire()` may also return a `Promise`.
- *
  * @typeParam ContextT Request context type (e.g. partition key).
- * @typeParam RejResultT The result type produced by the rejection strategy.
  */
-export class Limiter<
-  Context = void,
-  AcquireResult extends SyncAcquireResult | AsyncAcquireResult =
-    SyncAcquireResult,
-> {
+export class Limiter<Context = void> {
   private _inflight = 0;
   private _limit: number;
   private readonly clock: () => number;
   private readonly limitAlgorithm: AdaptiveLimit;
   private readonly acquireStrategy: AcquireStrategy<Context>;
   private readonly rejectionStrategy:
-    | AllotmentUnavailableStrategy<Context, AcquireResult>
+    | AllotmentUnavailableStrategy<Context>
     | undefined;
   private readonly bypassResolver: ((context: Context) => boolean) | undefined;
 
@@ -181,7 +165,7 @@ export class Limiter<
     return new GradientLimit();
   }
 
-  constructor(options: LimiterOptions<Context, AcquireResult> = {}) {
+  constructor(options: LimiterOptions<Context> = {}) {
     this.clock = options.clock ?? (() => performance.now());
     this.limitAlgorithm = options.limit ?? Limiter.makeDefaultLimit();
     this._limit = this.limitAlgorithm.currentLimit;
@@ -223,9 +207,7 @@ export class Limiter<
     });
   }
 
-  acquire(
-    options?: AcquireOptions<Context>,
-  ): SyncAcquireResult | AcquireResult {
+  async acquire(options?: AcquireOptions<Context>): AcquireResult {
     if (options?.signal?.aborted) return undefined;
     const ctx = (options?.context ?? undefined) as Context;
 
@@ -239,7 +221,7 @@ export class Limiter<
       inflight: this._inflight,
     };
 
-    if (!this.acquireStrategy.tryAcquireAllotment(ctx, state)) {
+    if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       this.rejectedCounter.increment();
       if (this.rejectionStrategy) {
         return this.rejectionStrategy.onAllotmentUnavailable(
@@ -254,12 +236,12 @@ export class Limiter<
     return this.createAllotment(ctx);
   }
 
-  private tryAcquireCore(ctx: Context): SyncAcquireResult {
+  private async tryAcquireCore(ctx: Context): AcquireResult {
     const state: LimiterState = {
       limit: this._limit,
       inflight: this._inflight,
     };
-    if (!this.acquireStrategy.tryAcquireAllotment(ctx, state)) {
+    if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       return undefined;
     }
     return this.createAllotment(ctx);
@@ -270,35 +252,39 @@ export class Limiter<
     const currentInflight = ++this._inflight;
 
     return {
-      reportSuccess: () => {
+      releaseAndRecordSuccess: async () => {
+        const endTime = this.clock();
+        const rtt = endTime - startTime;
         this._inflight--;
-        this.acquireStrategy.onAllotmentReleased(ctx);
+        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.successCounter.increment();
         this.limitAlgorithm.addSample(
           startTime,
-          this.clock() - startTime,
+          rtt,
           currentInflight,
           false,
         );
-        this.rejectionStrategy?.onAllotmentReleased();
+        await this.rejectionStrategy?.onAllotmentReleased();
       },
-      reportIgnore: () => {
+      releaseAndIgnore: async () => {
         this._inflight--;
-        this.acquireStrategy.onAllotmentReleased(ctx);
+        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.ignoredCounter.increment();
-        this.rejectionStrategy?.onAllotmentReleased();
+        await this.rejectionStrategy?.onAllotmentReleased();
       },
-      reportDropped: () => {
+      releaseAndRecordDropped: async () => {
+        const endTime = this.clock();
+        const rtt = endTime - startTime;
         this._inflight--;
-        this.acquireStrategy.onAllotmentReleased(ctx);
+        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.droppedCounter.increment();
         this.limitAlgorithm.addSample(
           startTime,
-          this.clock() - startTime,
+          rtt,
           currentInflight,
           true,
         );
-        this.rejectionStrategy?.onAllotmentReleased();
+        await this.rejectionStrategy?.onAllotmentReleased();
       },
     };
   }
@@ -343,31 +329,6 @@ export class SemaphoreStrategy {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helper: whenAcquireSettled
-// ---------------------------------------------------------------------------
-
-/**
- * Run a callback when an acquire result is ready. If the result is a Promise,
- * waits asynchronously; otherwise invokes the callback synchronously.
- */
-export function whenAcquireSettled(
-  result: AcquireResult,
-  callback: (allotment: LimitAllotment | undefined) => void,
-): void {
-  if (
-    result !== null &&
-    typeof result === "object" &&
-    "then" in result &&
-    typeof (result as PromiseLike<LimitAllotment | undefined>).then ===
-      "function"
-  ) {
-    void (result as Promise<LimitAllotment | undefined>).then(callback);
-  } else {
-    callback(result as LimitAllotment | undefined);
-  }
-}
-
 export type RunCallbackArgs<ContextT> = {
   context: ContextT | undefined;
   signal: AbortSignal | undefined;
@@ -376,14 +337,14 @@ export interface LimitedFunction<ContextT> {
   <T, E extends Error = Error>(
     fn: (
       args: RunCallbackArgs<ContextT>,
-    ) => RunResult<T, E> | Promise<RunResult<T, E>>,
+    ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>,
   ): Promise<T | typeof QuotaNotAvailable>;
 
   <T, E extends Error = Error>(
     options: AcquireOptions<ContextT>,
     fn: (
       args: RunCallbackArgs<ContextT>,
-    ) => RunResult<T, E> | Promise<RunResult<T, E>>,
+    ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>,
   ): Promise<T | typeof QuotaNotAvailable>;
 }
 
@@ -393,25 +354,26 @@ export interface LimitedFunction<ContextT> {
  * - If {@link Limiter.acquire} yields no allotment, returns
  *   {@link QuotaNotAvailable} without invoking `fn`.
  * - On {@link RunResult} `success` / `ignore`, returns the carried value after
- *   reporting to the allotment.
- * - On `dropped`, reports drop and throws the carried error.
- * - On uncaught exceptions from `fn`, reports ignore and rethrows, except for
- *   {@link AdaptiveTimeoutError}, which reports drop and rethrows.
+ *   recording success/ignore to the allotment.
+ * - On `dropped`, records drop and throws the carried error.
+ * - If callback returns a non-{@link RunResult} value, it is treated as
+ *   implicit success and returned as-is.
+ * - On uncaught exceptions from `fn`, records ignore and rethrows, except for
+ *   {@link AdaptiveTimeoutError}, which records drop and rethrows.
  * - Callback receives `{ context, signal }` from acquire options.
  */
-export function withLimiter<
-  ContextT,
-  RejResultT extends SyncAcquireResult | AsyncAcquireResult,
->(limiter: Limiter<ContextT, RejResultT>): LimitedFunction<ContextT> {
+export function withLimiter<ContextT>(
+  limiter: Limiter<ContextT>,
+): LimitedFunction<ContextT> {
   async function limited<T, E extends Error = Error>(
     optionsOrFn:
       | AcquireOptions<ContextT>
       | ((
           args: RunCallbackArgs<ContextT>,
-        ) => RunResult<T, E> | Promise<RunResult<T, E>>),
+        ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>),
     maybeFn?: (
       args: RunCallbackArgs<ContextT>,
-    ) => RunResult<T, E> | Promise<RunResult<T, E>>,
+    ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>,
   ): Promise<T | typeof QuotaNotAvailable> {
     const hasOptions = maybeFn !== undefined;
     const options = hasOptions
@@ -421,9 +383,9 @@ export function withLimiter<
       ? maybeFn!
       : (optionsOrFn as (
           args: RunCallbackArgs<ContextT>,
-        ) => RunResult<T, E> | Promise<RunResult<T, E>>);
+        ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>);
 
-    const allotment = await Promise.resolve(limiter.acquire(options));
+    const allotment = await limiter.acquire(options);
     if (!allotment) {
       return QuotaNotAvailable;
     }
@@ -437,35 +399,31 @@ export function withLimiter<
 
     if (result.status === "rejected") {
       if (isAdaptiveTimeoutError(result.reason)) {
-        allotment.reportDropped();
+        await allotment.releaseAndRecordDropped();
       } else {
-        allotment.reportIgnore();
+        await allotment.releaseAndIgnore();
       }
       throw result.reason;
     }
 
     const outcome = result.value;
+    if (!isRunResult(outcome)) {
+      await allotment.releaseAndRecordSuccess();
+      return outcome as T;
+    }
 
     switch (outcome.kind) {
       case "success":
-        allotment.reportSuccess();
+        await allotment.releaseAndRecordSuccess();
         return outcome.value;
       case "ignore":
-        allotment.reportIgnore();
+        await allotment.releaseAndIgnore();
         return outcome.value;
       case "dropped":
-        allotment.reportDropped();
+        await allotment.releaseAndRecordDropped();
         throw outcome.error;
     }
   }
 
   return limited;
-}
-
-/**
- * Synchronous try-acquire interface. A `Limiter<Ctx>` (with default sync
- * rejection) is structurally compatible with this interface.
- */
-export interface SyncLimiter<ContextT = void> {
-  acquire(options?: AcquireOptions<ContextT>): LimitAllotment | undefined;
 }

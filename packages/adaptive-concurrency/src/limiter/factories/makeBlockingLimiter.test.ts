@@ -11,7 +11,7 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
 
     const allotment = await limiter.acquire({});
     assert.ok(allotment);
-    allotment!.reportSuccess();
+    await allotment!.releaseAndRecordSuccess();
   });
 
   it("blocks and then acquires when a token is released", async () => {
@@ -24,11 +24,11 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
     assert.ok(first);
 
     const waiting = limiter.acquire({});
-    setTimeout(() => first!.reportSuccess(), 50);
+    setTimeout(() => first!.releaseAndRecordSuccess(), 50);
 
     const second = await waiting;
     assert.ok(second);
-    second!.reportSuccess();
+    await second!.releaseAndRecordSuccess();
   });
 
   it("returns undefined on timeout", async () => {
@@ -69,7 +69,7 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
     assert.ok(first);
 
     const waiters = [limiter.acquire({}), limiter.acquire({}), limiter.acquire({})];
-    first!.reportSuccess();
+    await first!.releaseAndRecordSuccess();
 
     const second = await waiters[0];
     assert.ok(second);
@@ -90,6 +90,6 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
 
     const second = await waiting;
     assert.equal(second, undefined);
-    first!.reportSuccess();
+    await first!.releaseAndRecordSuccess();
   });
 });

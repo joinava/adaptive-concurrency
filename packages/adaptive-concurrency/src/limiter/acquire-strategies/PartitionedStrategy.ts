@@ -1,10 +1,10 @@
-import type { AcquireStrategy, LimiterState } from "../Limiter.js";
+import type { AcquireStrategy, LimiterState } from "../../Limiter.js";
 import type {
   DistributionMetric,
   GaugeMetric,
   MetricRegistry,
-} from "../MetricRegistry.js";
-import { MetricIds, NoopMetricRegistry } from "../MetricRegistry.js";
+} from "../../MetricRegistry.js";
+import { MetricIds, NoopMetricRegistry } from "../../MetricRegistry.js";
 
 const PARTITION_TAG_NAME = "partition";
 

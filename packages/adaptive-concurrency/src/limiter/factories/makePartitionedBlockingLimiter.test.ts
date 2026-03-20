@@ -26,11 +26,11 @@ describe("makePartitionedBlockingLimiter", () => {
     assert.ok(first);
 
     const waiting = limiter.acquire({ context: "a" });
-    setTimeout(() => first!.reportSuccess(), 25);
+    setTimeout(() => first!.releaseAndRecordSuccess(), 25);
 
     const second = await waiting;
     assert.ok(second);
-    second!.reportSuccess();
+    await second!.releaseAndRecordSuccess();
   });
 
   it("returns undefined on timeout", async () => {
@@ -80,7 +80,7 @@ describe("makePartitionedBlockingLimiter", () => {
       limiter.acquire({ context: "a" }),
       limiter.acquire({ context: "a" }),
     ];
-    first!.reportSuccess();
+    await first!.releaseAndRecordSuccess();
     assert.ok(await waiters[0]);
   });
 
@@ -96,7 +96,7 @@ describe("makePartitionedBlockingLimiter", () => {
     assert.ok(first);
 
     const waiting = limiter.acquire({ context: "a" });
-    setTimeout(() => first!.reportSuccess(), 10);
+    setTimeout(() => first!.releaseAndRecordSuccess(), 10);
 
     const start = performance.now();
     const second = await waiting;
@@ -104,7 +104,7 @@ describe("makePartitionedBlockingLimiter", () => {
 
     assert.ok(second);
     assert.ok(elapsed >= 30, `expected at least partition delay, got ${elapsed}ms`);
-    second!.reportSuccess();
+    await second!.releaseAndRecordSuccess();
   });
 
   it("returns undefined when aborted while waiting", async () => {

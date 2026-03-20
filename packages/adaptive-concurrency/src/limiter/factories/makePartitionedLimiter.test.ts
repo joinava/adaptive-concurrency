@@ -75,7 +75,7 @@ describe("makePartitionedLimiter", () => {
     const b = await limiter.acquire({ context: "b" });
     assert.ok(a && b);
     assert.equal(await limiter.acquire({ context: "a" }), undefined);
-    a!.reportSuccess();
+    await a!.releaseAndRecordSuccess();
     assert.ok(await limiter.acquire({ context: "a" }));
   });
 

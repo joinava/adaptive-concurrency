@@ -42,7 +42,7 @@ Java behavior is spread across classes/decorators:
 TypeScript uses one concrete `Limiter` class plus two extension points:
 
 - `AcquireStrategy<ContextT>`: decides slot allocation (semaphore, partitioned, etc.)
-- `AllotmentUnavailableStrategy<ContextT, ResultT>`: decides behavior when no slot is available
+- `AllotmentUnavailableStrategy<ContextT>`: decides behavior when no slot is available
 
 This moves customization from subclassing to composition.
 
@@ -78,9 +78,9 @@ Time conversion is a key migration concern: Java nanoseconds vs TypeScript milli
 | Java                                | TypeScript                           |
 | ----------------------------------- | ------------------------------------ |
 | `Limiter.Listener` nested interface | top-level `LimitAllotment` interface |
-| `onSuccess()`                       | `reportSuccess()`                    |
-| `onIgnore()`                        | `reportIgnore()`                     |
-| `onDropped()`                       | `reportDropped()`                    |
+| `onSuccess()`                       | `releaseAndRecordSuccess()`          |
+| `onIgnore()`                        | `releaseAndIgnore()`           |
+| `onDropped()`                       | `releaseAndRecordDropped()`          |
 
 Semantics are equivalent: exactly one completion method should be called.
 
@@ -89,7 +89,7 @@ Semantics are equivalent: exactly one completion method should be called.
 | Java                                   | TypeScript                                                       |
 | -------------------------------------- | ---------------------------------------------------------------- |
 | functional interface                   | concrete class                                                   |
-| `acquire(context): Optional<Listener>` | `acquire(options?): LimitAllotment \| undefined \| Promise<...>` |
+| `acquire(context): Optional<Listener>` | `acquire(options?): Promise<LimitAllotment \| undefined>`         |
 | rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                        |
 | context passed positionally            | options object (`{ context, signal? }`)                          |
 
@@ -113,12 +113,10 @@ No direct Java equivalent.
 - Callback returns `RunResult`: `success(value)`, `ignore(value)`, or `dropped(error)`.
 - If no allotment is available, returns `QuotaNotAvailable` and does not invoke `fn`.
 - Callback receives `{ context, signal }` from `AcquireOptions`.
-- If `fn` throws/rejects unexpectedly, `limited()` calls `reportIgnore()` and rethrows, except `AdaptiveTimeoutError`, which is treated as dropped (`reportDropped()`) and rethrown.
+- If `fn` throws/rejects unexpectedly, `limited()` calls `releaseAndIgnore()` and rethrows, except `AdaptiveTimeoutError`, which is treated as dropped (`releaseAndRecordDropped()`) and rethrown.
 
 ### Other TS-only helpers/types
 
-- `whenAcquireSettled(...)` for handling sync/async acquire uniformly
-- `SyncLimiter` compatibility interface
 - `LimiterState` (`{ limit, inflight }`) passed to acquire strategies
 - `ListenerSet`
 - exported run helpers/types (`RunResult`, `RunSuccess`, `RunIgnore`, `RunDropped`)
@@ -309,8 +307,6 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 - `withLimiter(limiter)`
 - `RunResult` + `success/ignore/dropped`
 - `QuotaNotAvailable` sentinel
-- `whenAcquireSettled(...)`
-- `SyncLimiter` interface
 - `LimiterState` strategy input
 - `AcquireStrategy` / `AllotmentUnavailableStrategy` public extension points
 - `ListenerSet`
@@ -325,7 +321,7 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 ## 13. Migration checklist
 
 1. Replace `Optional<Limiter.Listener>` with `LimitAllotment | undefined` (or promise thereof).
-2. Rename listener methods: `onSuccess/onIgnore/onDropped` -> `reportSuccess/reportIgnore/reportDropped`.
+2. Rename listener methods: `onSuccess/onIgnore/onDropped` -> `releaseAndRecordSuccess/releaseAndIgnore/releaseAndRecordDropped`.
 3. Replace `Limit` API usage with `AdaptiveLimit` (`getLimit`/`notifyOnChange`/`onSample` -> `currentLimit`/`subscribe`/`addSample`).
 4. Convert nanosecond logic to milliseconds.
 5. Replace builder/decorator constructions with `new Limiter({...})` plus strategies.

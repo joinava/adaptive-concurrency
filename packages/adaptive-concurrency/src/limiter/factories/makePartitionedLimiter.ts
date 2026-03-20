@@ -1,14 +1,12 @@
 import {
   Limiter,
-  type AsyncAcquireResult,
   type LimiterOptions,
-  type SyncAcquireResult,
 } from "../../Limiter.js";
-import { DelayedRejectStrategy } from "../DelayedRejectStrategy.js";
+import { DelayedRejectStrategy } from "../allocation-unavailable-strategies/DelayedRejectStrategy.js";
 import {
   PartitionedStrategy,
   type PartitionConfig,
-} from "../PartitionedStrategy.js";
+} from "../acquire-strategies/PartitionedStrategy.js";
 
 export function makePartitionedLimiter<
   ContextT,
@@ -16,12 +14,9 @@ export function makePartitionedLimiter<
 >(options: {
   partitionResolver: (context: ContextT) => PartitionName | undefined;
   partitions: Record<PartitionName, PartitionConfig & { delayMs?: number }>;
-  limiter?: Omit<
-    LimiterOptions<ContextT, SyncAcquireResult>,
-    "acquireStrategy"
-  >;
+  limiter?: Omit<LimiterOptions<ContextT>, "acquireStrategy">;
   maxConcurrentDelays?: number;
-}): Limiter<ContextT, AsyncAcquireResult> {
+}): Limiter<ContextT> {
   const limit = options.limiter?.limit ?? Limiter.makeDefaultLimit();
   const delayByPartition = new Map<PartitionName, number>(
     Object.entries(options.partitions).map(([name, cfg]) => [
@@ -30,7 +25,7 @@ export function makePartitionedLimiter<
     ]),
   );
 
-  return new Limiter<ContextT, AsyncAcquireResult>({
+  return new Limiter<ContextT>({
     ...options.limiter,
     limit,
     acquireStrategy: new PartitionedStrategy<ContextT, PartitionName>({

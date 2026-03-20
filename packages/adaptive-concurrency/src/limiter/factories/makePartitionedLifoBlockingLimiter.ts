@@ -1,19 +1,17 @@
 import {
   Limiter,
-  type AsyncAcquireResult,
   type LimiterOptions,
-  type SyncAcquireResult,
 } from "../../Limiter.js";
-import { DelayedRejectStrategy } from "../DelayedRejectStrategy.js";
-import { DelayedThenBlockingRejection } from "../DelayedThenBlockingRejection.js";
+import { DelayedRejectStrategy } from "../allocation-unavailable-strategies/DelayedRejectStrategy.js";
+import { DelayedThenBlockingRejection } from "../allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
 import {
   LifoBlockingRejection,
   type LifoBlockingRejectionOptions,
-} from "../LifoBlockingRejection.js";
+} from "../allocation-unavailable-strategies/LifoBlockingRejection.js";
 import {
   PartitionedStrategy,
   type PartitionConfig,
-} from "../PartitionedStrategy.js";
+} from "../acquire-strategies/PartitionedStrategy.js";
 
 export function makePartitionedLifoBlockingLimiter<
   ContextT,
@@ -21,14 +19,11 @@ export function makePartitionedLifoBlockingLimiter<
 >(options: {
   partitionResolver: (context: ContextT) => PartitionName | undefined;
   partitions: Record<PartitionName, PartitionConfig & { delayMs?: number }>;
-  limiter?: Omit<
-    LimiterOptions<ContextT, SyncAcquireResult>,
-    "acquireStrategy"
-  >;
+  limiter?: Omit<LimiterOptions<ContextT>, "acquireStrategy">;
   maxConcurrentDelays?: number;
   backlogSize?: number;
   backlogTimeout?: LifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
-}): Limiter<ContextT, AsyncAcquireResult> {
+}): Limiter<ContextT> {
   const limit = options.limiter?.limit ?? Limiter.makeDefaultLimit();
   const delayByPartition = new Map(
     Object.entries(options.partitions).map(([name, cfg]) => [
@@ -37,7 +32,7 @@ export function makePartitionedLifoBlockingLimiter<
     ]),
   );
 
-  return new Limiter<ContextT, AsyncAcquireResult>({
+  return new Limiter<ContextT>({
     ...options.limiter,
     limit,
     acquireStrategy: new PartitionedStrategy<ContextT, PartitionName>({

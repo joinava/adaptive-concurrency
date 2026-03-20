@@ -107,13 +107,15 @@ if (out === QuotaNotAvailable) {
 
 **Callback return type (`RunResult`)**
 
-Build values with the helpers **`success(value)`**, **`ignore(value)`**, and **`dropped(error)`**. Each carries a discriminant **`kind`**: `"success" | "ignore" | "dropped"`.
+Build values with the helpers **`success(value)`**, **`ignore(value)`**, and **`dropped(error)`**. Callers should always use these helper functions rather than constructing `RunResult` objects directly.
+
+If your callback returns any value that is **not** a valid `RunResult`, `withLimiter(...)` treats it as an implicit success (calls `releaseAndRecordSuccess()`) and resolves with that value.
 
 | Result         | Effect                                                                                   |
 | -------------- | ---------------------------------------------------------------------------------------- |
-| `success(v)`   | `reportSuccess()`, limit algorithm gets an RTT sample; **`limited` resolves with `v`**.  |
-| `ignore(v)`    | `reportIgnore()`, no RTT sample; **`limited` resolves with `v`**.                        |
-| `dropped(err)` | `reportDropped()`, overload-style signal to the limit; **`limited` rejects with `err`**. |
+| `success(v)`   | `releaseAndRecordSuccess()`, limit algorithm gets an RTT sample; **`limited` resolves with `v`**.  |
+| `ignore(v)`    | `releaseAndIgnore()`, no RTT sample; **`limited` resolves with `v`**.                        |
+| `dropped(err)` | `releaseAndRecordDropped()`, overload-style signal to the limit; **`limited` rejects with `err`**. |
 
 **`QuotaNotAvailable`**
 
@@ -121,22 +123,20 @@ If `acquire` yields no allotment, **`limited` returns the sentinel `QuotaNotAvai
 
 **Errors thrown from `fn`**
 
-If the callback **rejects** or **throws** before returning a `RunResult`, the allotment is completed with **`reportIgnore()`**, and the error is **rethrown**. The one exception is **`AdaptiveTimeoutError`**, which is treated as a drop (`reportDropped()`) and then rethrown. Use `dropped(yourError)` or throw `AdaptiveTimeoutError` when the outcome should count as a **drop** for adaptive limiting.
+If the callback **rejects** or **throws** before returning a `RunResult`, the allotment is completed with **`releaseAndIgnore()`**, and the error is **rethrown**. The one exception is **`AdaptiveTimeoutError`**, which is treated as a drop (`releaseAndRecordDropped()`) and then rethrown. Use `dropped(yourError)` or throw `AdaptiveTimeoutError` when the outcome should count as a **drop** for adaptive limiting.
 
 #### Advanced Usage with `acquire`
 
-Acquire is a lower-level API that's not as safe, as you MUST be sure to call `reportSuccess()`, `reportDropped()` or `reportIgnore()` when the operation is complete.
+Acquire is a lower-level API that's not as safe, as you MUST be sure to call `releaseAndRecordSuccess()`, `releaseAndRecordDropped()` or `releaseAndIgnore()` when the operation is complete.
 
 ```typescript
-// allotment might or might not be a Promise, depending on how your
-// limiter was configured, but the types will tell you if it's not.
-const allotment = limiter.acquire({ context: "tenant-a" });
+const allotment = await limiter.acquire({ context: "tenant-a" });
 if (allotment) {
   try {
     await doWork();
-    allotment.reportSuccess();
+    await allotment.releaseAndRecordSuccess();
   } catch {
-    allotment.reportDropped();
+    await allotment.releaseAndRecordDropped();
   }
 } else {
   // No allotment right now
@@ -145,7 +145,7 @@ if (allotment) {
 
 To use it, pass **`AcquireOptions`**: `{ context }` when the limiter is keyed by context, `{ signal }` for `AbortSignal`, or omit/`{}` for a void context.
 
-`acquire` returns **`LimitAllotment | undefined`**. When a **rejection strategy** is configured (e.g. FIFO blocking), the return type can include a **`Promise`** of that same shape. Use **`await`** so both sync and async acquire results work. For callback-style code without `async`/`await`, **`whenAcquireSettled(result, callback)`** invokes the callback when the allotment (or `undefined`) is ready.
+`acquire` returns **`Promise<LimitAllotment | undefined>`** and should be awaited directly.
 
 Use **`acquire` + `LimitAllotment`** when you need a separate acquire and release (framework hooks, streaming lifetimes, handoff to another owner). Use **`withLimiter(limiter)`** when a single async scope is enough.
 
@@ -196,7 +196,7 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 
 - **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`rejectionStrategy`**.
 - **`PartitionedStrategy`** — Percentage-based partitions (combine with `Limiter` via `acquireStrategy`). Per-partition reject delay is not configured here; use **`DelayedRejectStrategy`** and your own delay map keyed by partition.
-- **`FifoBlockingRejection` / `LifoBlockingRejection`** — When at capacity, wait on a promise (FIFO fair vs LIFO for tail latency). Use with `Limiter<Ctx, Promise<LimitAllotment | undefined>>`.
+- **`FifoBlockingRejection` / `LifoBlockingRejection`** — When at capacity, wait on a promise (FIFO fair vs LIFO for tail latency).
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
 
 ## Development
