@@ -1,6 +1,12 @@
 /**
  * Handle returned when a concurrency slot is acquired. The caller must invoke
  * exactly one of the release-and-xxx methods when the operation completes.
+ *
+ * **Important for implementers:** the release methods below must never throw
+ * or produce a rejected promise. If an error occurs internally (e.g. notifying
+ * a strategy), the implementation is responsible for catching and handling it.
+ * Callers may invoke these methods in a fire-and-forget manner (without
+ * awaiting), so any rejection would become an unhandled promise rejection.
  */
 export interface LimitAllotment {
   /**

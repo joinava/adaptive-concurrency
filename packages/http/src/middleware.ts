@@ -108,21 +108,21 @@ export function concurrencyLimitMiddleware(
     // Keep the permit for the full response lifetime.
     res.once("finish", () => {
       if (sawError) {
-        void releaseDropped();
+        releaseDropped().catch(() => {});
         return;
       }
 
       const classification = classifyCompletedResponse(res);
       if (classification === "success") {
-        void releaseSuccess();
+        releaseSuccess().catch(() => {});
       } else if (classification === "ignore") {
-        void releaseIgnore();
+        releaseIgnore().catch(() => {});
       } else {
-        void releaseDropped();
+        releaseDropped().catch(() => {});
       }
     });
     res.once("close", () => {
-      void releaseIgnore();
+      releaseIgnore().catch(() => {});
     });
 
     try {
