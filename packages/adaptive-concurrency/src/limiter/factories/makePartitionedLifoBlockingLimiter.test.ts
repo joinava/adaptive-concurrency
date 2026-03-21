@@ -115,4 +115,17 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     assert.ok(second);
     assert.ok(elapsed >= 25);
   });
+
+  it("throws when backlogTimeout exceeds max timeout", () => {
+    assert.throws(
+      () =>
+        makePartitionedLifoBlockingLimiter<string>({
+          backlogTimeout: 60 * 60 * 1000 + 1,
+          limiter: { limit: new FixedLimit(1) },
+          partitionResolver: (ctx) => ctx,
+          partitions: { a: { percent: 1, delayMs: 0 } },
+        }),
+      /Timeout cannot be greater than/,
+    );
+  });
 });

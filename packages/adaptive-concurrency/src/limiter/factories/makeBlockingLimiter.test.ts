@@ -16,7 +16,7 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
 
   it("blocks and then acquires when a token is released", async () => {
     const limiter = makeBlockingLimiter<void>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
     });
 
@@ -31,9 +31,9 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
     await second!.releaseAndRecordSuccess();
   });
 
-  it("returns undefined on timeout", async () => {
+  it("returns undefined on backlog timeout", async () => {
     const limiter = makeBlockingLimiter<void>({
-      timeout: 100,
+      backlogTimeout: 100,
       limiter: { limit: new FixedLimit(1) },
     });
 
@@ -48,11 +48,11 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
     assert.ok(elapsed >= 50);
   });
 
-  it("throws when timeout exceeds max timeout", () => {
+  it("throws when backlogTimeout exceeds max timeout", () => {
     assert.throws(
       () =>
         makeBlockingLimiter<void>({
-          timeout: 60 * 60 * 1000 + 1,
+          backlogTimeout: 60 * 60 * 1000 + 1,
           limiter: { limit: new FixedLimit(1) },
         }),
       /Timeout cannot be greater than/,
@@ -61,7 +61,7 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
 
   it("allows a waiting caller to acquire after release", async () => {
     const limiter = makeBlockingLimiter<void>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
     });
 
@@ -77,7 +77,7 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
 
   it("returns undefined when aborted while waiting", async () => {
     const limiter = makeBlockingLimiter<void>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
     });
 

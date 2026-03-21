@@ -93,6 +93,12 @@ export interface AllotmentUnavailableStrategy<ContextT> {
    * Blocking strategies use this to wake queued waiters.
    */
   onAllotmentReleased(): MaybePromise<void>;
+
+  /**
+   * Called when the adaptive limit changes. Blocking strategies can use this to
+   * proactively drain queued waiters when capacity increases.
+   */
+  onLimitChanged?(oldLimit: number, newLimit: number): MaybePromise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +185,7 @@ export class Limiter<Context = void> {
       const oldLimit = this._limit;
       this._limit = newLimit;
       this.acquireStrategy.onLimitChanged?.(oldLimit, newLimit);
+      void this.rejectionStrategy?.onLimitChanged?.(oldLimit, newLimit);
     });
 
     const registry = options.metricRegistry ?? NoopMetricRegistry;
