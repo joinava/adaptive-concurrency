@@ -20,7 +20,7 @@ export type AcquireResult = Promise<LimitAllotment | undefined>;
 
 export interface AcquireOptions<ContextT = void> {
   context?: ContextT;
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 // ---------------------------------------------------------------------------
