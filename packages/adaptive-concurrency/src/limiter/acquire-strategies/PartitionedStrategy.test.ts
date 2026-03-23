@@ -1,7 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Limiter } from "../../Limiter.js";
-import { PartitionedStrategy } from "./PartitionedStrategy.js";
+import {
+  PartitionedStrategy,
+  type PartitionConfig,
+} from "./PartitionedStrategy.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 
@@ -11,7 +14,7 @@ function makePartitionedLimiter<
 >(options: {
   limit: FixedLimit | SettableLimit;
   partitionResolver: (ctx: ContextT) => PartitionName | undefined;
-  partitions: Record<PartitionName, { percent: number }>;
+  partitions: Record<PartitionName, PartitionConfig>;
   bypassResolver?: (ctx: ContextT) => boolean;
 }) {
   const limitAlgo = options.limit;
@@ -63,6 +66,53 @@ describe("PartitionedStrategy", () => {
     }
 
     assert.equal(listeners.length, 10, "Should use full global limit when partition is alone");
+  });
+
+  it("should cap burst when burstMode is capped", async () => {
+    const limiter = makePartitionedLimiter<string>({
+      limit: new FixedLimit(10),
+      partitionResolver: (ctx) => ctx,
+      partitions: {
+        a: {
+          percent: 0.3,
+          burstMode: { kind: "capped", maxBurstMultiplier: 2.0 },
+        },
+        b: { percent: 0.7 },
+      },
+    });
+
+    const listeners = [];
+    for (let i = 0; i < 10; i++) {
+      const l = await limiter.acquire({ context: "a" });
+      if (l) listeners.push(l);
+    }
+
+    // limitAtGlobalSaturation(a)=ceil(10*0.3)=3, capped burst=ceil(3*2)=6
+    assert.equal(listeners.length, 6, "Burst should be capped by maxBurstMultiplier");
+  });
+
+  it("should disallow burst when burstMode is none", async () => {
+    const limiter = makePartitionedLimiter<string>({
+      limit: new FixedLimit(10),
+      partitionResolver: (ctx) => ctx,
+      partitions: {
+        a: { percent: 0.3, burstMode: { kind: "none" } },
+        b: { percent: 0.7 },
+      },
+    });
+
+    const listeners = [];
+    for (let i = 0; i < 10; i++) {
+      const l = await limiter.acquire({ context: "a" });
+      if (l) listeners.push(l);
+    }
+
+    // limitAtGlobalSaturation(a)=ceil(10*0.3)=3 and no extra burst.
+    assert.equal(
+      listeners.length,
+      3,
+      "No-burst mode should limit to guaranteed share even with global slack",
+    );
   });
 
   it("should enforce partition limits when global limit is exceeded", async () => {
@@ -162,7 +212,12 @@ describe("PartitionedStrategy", () => {
   it("should expose partition state via the strategy", () => {
     const strategy = new PartitionedStrategy<string>({
       partitionResolver: (ctx) => ctx,
-      partitions: { a: { percent: 1.0 } },
+      partitions: {
+        a: {
+          percent: 1.0,
+          burstMode: { kind: "capped", maxBurstMultiplier: 3 },
+        },
+      },
       initialLimit: 2,
     });
 
@@ -173,5 +228,9 @@ describe("PartitionedStrategy", () => {
 
     const partition = strategy.getPartition("a");
     assert.equal(partition?.name, "a");
+    assert.deepEqual(partition?.burstMode, {
+      kind: "capped",
+      maxBurstMultiplier: 3,
+    });
   });
 });

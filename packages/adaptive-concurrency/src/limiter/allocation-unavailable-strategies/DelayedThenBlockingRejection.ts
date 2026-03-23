@@ -1,7 +1,7 @@
 import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
-  AllotmentUnavailableStrategy,
   AcquireResult,
+  AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
 import type { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 
@@ -34,6 +34,15 @@ export class DelayedThenBlockingRejection<
       return undefined;
     }
     const allotment = await retry(context);
+
+    if (allotment) {
+      return allotment;
+    }
+
+    if (signal?.aborted) {
+      return undefined;
+    }
+
     return (
       allotment ??
       this.blockingStrategy.onAllotmentUnavailable(context, retry, signal)
