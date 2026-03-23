@@ -26,6 +26,8 @@
   },
   "devDependencies": {
     "tsx": "^4.19.0",
+    "type-fest": "^5.5.0",
+    "type-party": "^0.7.3",
     "typescript": "next"
   }
 }

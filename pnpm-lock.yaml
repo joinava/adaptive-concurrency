@@ -21,9 +21,15 @@ importers:
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
+      type-fest:
+        specifier: ^5.5.0
+        version: 5.5.0
+      type-party:
+        specifier: ^0.7.3
+        version: 0.7.3
       typescript:
         specifier: next
-        version: 6.0.0-dev.20260319
+        version: 6.0.0-dev.20260323
 
   packages/http:
     dependencies:
@@ -39,7 +45,7 @@ importers:
         version: 4.21.0
       typescript:
         specifier: next
-        version: 6.0.0-dev.20260319
+        version: 6.0.0-dev.20260323
 
 packages:
 
@@ -223,13 +229,28 @@ packages:
   resolve-pkg-maps@1.0.0:
     resolution: {integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==}
 
+  safe-stable-stringify@2.5.0:
+    resolution: {integrity: sha512-b3rppTKm9T+PsVCBEOUR46GWI7fdOs00VKZ1+9c1EWDaDMvjQc6tUwuFyIprgGgTcWoVHSKrU8H31ZHA2e0RHA==}
+    engines: {node: '>=10'}
+
+  tagged-tag@1.0.0:
+    resolution: {integrity: sha512-yEFYrVhod+hdNyx7g5Bnkkb0G6si8HJurOoOEgC8B/O0uXLHlaey/65KRv6cuWBNhBgHKAROVpc7QyYqE5gFng==}
+    engines: {node: '>=20'}
+
   tsx@4.21.0:
     resolution: {integrity: sha512-5C1sg4USs1lfG0GFb2RLXsdpXqBSEhAaA/0kPL01wxzpMqLILNxIxIOKiILz+cdg/pLnOUxFYOR5yhHU666wbw==}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
-  typescript@6.0.0-dev.20260319:
-    resolution: {integrity: sha512-cPKC2xbgwa6CfD0IZ2ri818t0tkJdx2S+HCsFtO+n+H7ElNu0XecKUEgjzzq9dBeRWvuVXbk4Gfr98pQSOXtCA==}
+  type-fest@5.5.0:
+    resolution: {integrity: sha512-PlBfpQwiUvGViBNX84Yxwjsdhd1TUlXr6zjX7eoirtCPIr08NAmxwa+fcYBTeRQxHo9YC9wwF3m9i700sHma8g==}
+    engines: {node: '>=20'}
+
+  type-party@0.7.3:
+    resolution: {integrity: sha512-6IuzC5bi896TXv23XuN2b5eGPMX+KeU40fKz0QlEeT/qeaafG+pZa1ArhprSCufQ/aej9K1RZF930by0if+UyA==}
+
+  typescript@6.0.0-dev.20260323:
+    resolution: {integrity: sha512-nCvhfEJAUm4YK06mVZUCgwdCFT0ArNJlR4KYBcspKNvh+mAsNKNSTQ2NvYxQKV9mPFoey03HpO86XqxKhlOeFA==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -360,6 +381,10 @@ snapshots:
 
   resolve-pkg-maps@1.0.0: {}
 
+  safe-stable-stringify@2.5.0: {}
+
+  tagged-tag@1.0.0: {}
+
   tsx@4.21.0:
     dependencies:
       esbuild: 0.27.4
@@ -367,6 +392,15 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
 
-  typescript@6.0.0-dev.20260319: {}
+  type-fest@5.5.0:
+    dependencies:
+      tagged-tag: 1.0.0
+
+  type-party@0.7.3:
+    dependencies:
+      safe-stable-stringify: 2.5.0
+      type-fest: 5.5.0
+
+  typescript@6.0.0-dev.20260323: {}
 
   undici-types@6.21.0: {}
