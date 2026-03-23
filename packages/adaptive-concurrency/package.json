@@ -9,7 +9,7 @@
     "dynamic rate limiting"
   ],
   "author": "Ethan Resnick <ethan.resnick@gmail.com>",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "exports": {
     ".": {
@@ -22,7 +22,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test \"src/**/*.test.ts\""
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "prepublishOnly": "pnpm build"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
