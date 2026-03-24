@@ -95,13 +95,6 @@ export class BlockingBacklogRejection<
 
         const allotment = await waiter.retry(waiter.context);
         if (!allotment) {
-          // If the waiter was removed from the queue while retry was in-flight
-          // (e.g. abort or timeout), the retry may have acquired and released a
-          // slot whose onAllotmentReleased notification was suppressed by
-          // drainInProgress. Continue to serve remaining waiters.
-          if (this.queue.peekHead() !== waiter) {
-            continue;
-          }
           return;
         }
 

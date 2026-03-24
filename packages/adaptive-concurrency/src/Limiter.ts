@@ -243,7 +243,7 @@ export class Limiter<Context = void> {
 
       return this.rejectionStrategy.onAllotmentUnavailable(
         ctx,
-        (retryCtx) => this.tryAcquireCore(retryCtx, options?.signal),
+        (retryCtx) => this.tryAcquireCore(retryCtx),
         options?.signal,
       );
     }
@@ -259,10 +259,7 @@ export class Limiter<Context = void> {
     return allotment;
   }
 
-  private async tryAcquireCore(
-    ctx: Context,
-    signal?: AbortSignal,
-  ): AcquireResult {
+  private async tryAcquireCore(ctx: Context): AcquireResult {
     const state: LimiterState = {
       limit: this._limit,
       inflight: this._inflight,
@@ -271,13 +268,7 @@ export class Limiter<Context = void> {
       return undefined;
     }
 
-    const allotment = this.createAllotment(ctx);
-    if (signal?.aborted) {
-      await allotment.releaseAndIgnore();
-      return undefined;
-    }
-
-    return allotment;
+    return this.createAllotment(ctx);
   }
 
   private createAllotment(ctx: Context): LimitAllotment {
