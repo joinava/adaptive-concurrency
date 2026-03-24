@@ -40,9 +40,9 @@ export class BlockingBacklogRejection<
 
   constructor(options: BlockingBacklogRejectionOptions<ContextT>) {
     const backlogSize = options.backlogSize;
-    if (!Number.isFinite(backlogSize) || backlogSize < 0) {
+    if (Number.isNaN(backlogSize) || backlogSize < 0) {
       throw new RangeError(
-        "BlockingBacklogRejection: backlogSize must be a finite number greater than or equal to 0",
+        "BlockingBacklogRejection: backlogSize must be a non-NaN number greater than or equal to 0",
       );
     }
 
@@ -125,6 +125,7 @@ export class BlockingBacklogRejection<
     retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
   ): Promise<LimitAllotment | undefined> {
+    const timeout = this.getBacklogTimeout(context);
     return new Promise<LimitAllotment | undefined>((resolve) => {
       let settled = false;
       const settle = (allotment: LimitAllotment | undefined): void => {
@@ -142,7 +143,7 @@ export class BlockingBacklogRejection<
 
       const timer = setTimeout(
         () => settle(undefined),
-        this.getBacklogTimeout(context),
+        timeout,
       );
       const onAbort = (): void => settle(undefined);
       const cleanup = (): void => {
@@ -156,8 +157,13 @@ export class BlockingBacklogRejection<
   }
 
   private assertTimeoutWithinBounds(timeout: number): void {
+    if (!Number.isFinite(timeout) || timeout < 0) {
+      throw new RangeError(
+        "Timeout must be a finite number greater than or equal to 0",
+      );
+    }
     if (timeout > MAX_TIMEOUT) {
-      throw new Error(`Timeout cannot be greater than ${MAX_TIMEOUT} ms`);
+      throw new RangeError(`Timeout cannot be greater than ${MAX_TIMEOUT} ms`);
     }
   }
 }
