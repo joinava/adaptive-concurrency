@@ -96,8 +96,9 @@ export interface AllotmentUnavailableStrategy<ContextT> {
   onAllotmentReleased(): MaybePromise<void>;
 
   /**
-   * Called when the adaptive limit changes. Blocking strategies can use this to
-   * proactively drain queued waiters when capacity increases.
+   * Called when the adaptive limit changes. Blocking/rejection strategies can
+   * use this to proactively react to newly available capacity (e.g. drain
+   * backlog).
    */
   onLimitChanged?(oldLimit: number, newLimit: number): MaybePromise<void>;
 }

@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Limiter, withLimiter } from "./Limiter.js";
-import type { AcquireStrategy } from "./Limiter.js";
+import type { AcquireStrategy, AllotmentUnavailableStrategy } from "./Limiter.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import { FixedLimit } from "./limit/FixedLimit.js";
+import { SettableLimit } from "./limit/SettableLimit.js";
 import {
   AdaptiveTimeoutError,
   QuotaNotAvailable,
@@ -99,6 +100,42 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     assert.equal(limiter.getInflight(), 0);
   });
 
+  it("should adjust permits when limit changes", async () => {
+    const limit = new SettableLimit(5);
+    const limiter = new Limiter<string>({ limit });
+
+    for (let i = 0; i < 5; i++) {
+      await limiter.acquire({ context: "test" });
+    }
+    assert.equal(await limiter.acquire({ context: "test" }), undefined);
+
+    limit.setLimit(10);
+
+    const extra = await limiter.acquire({ context: "test" });
+    assert.ok(extra, "Should acquire after limit increase");
+  });
+
+  it("should forward limit changes to rejection strategy", () => {
+    const limit = new SettableLimit(2);
+    const limitChanges: Array<{ oldLimit: number; newLimit: number }> = [];
+    const rejectionStrategy: AllotmentUnavailableStrategy<string> = {
+      onAllotmentUnavailable() {
+        return Promise.resolve(undefined);
+      },
+      onAllotmentReleased() {},
+      onLimitChanged(oldLimit, newLimit) {
+        limitChanges.push({ oldLimit, newLimit });
+      },
+    };
+
+    new Limiter<string>({
+      limit,
+      allotmentUnavailableStrategy: rejectionStrategy,
+    });
+    limit.setLimit(4);
+
+    assert.deepEqual(limitChanges, [{ oldLimit: 2, newLimit: 4 }]);
+  });
   it("should release permits on ignore", async () => {
     const limiter = new Limiter<string>({
       limit: new FixedLimit(1),
