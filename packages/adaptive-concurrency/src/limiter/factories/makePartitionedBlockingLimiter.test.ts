@@ -6,7 +6,7 @@ import { makePartitionedBlockingLimiter } from "./makePartitionedBlockingLimiter
 describe("makePartitionedBlockingLimiter", () => {
   it("acquires immediately when under limit", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(2) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },
@@ -16,7 +16,7 @@ describe("makePartitionedBlockingLimiter", () => {
 
   it("waits for capacity", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },
@@ -33,9 +33,9 @@ describe("makePartitionedBlockingLimiter", () => {
     await second!.releaseAndRecordSuccess();
   });
 
-  it("returns undefined on timeout", async () => {
+  it("returns undefined on backlog timeout", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
-      timeout: 100,
+      backlogTimeout: 100,
       limiter: { limit: new FixedLimit(1) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },
@@ -51,11 +51,11 @@ describe("makePartitionedBlockingLimiter", () => {
     assert.ok(elapsed >= 50);
   });
 
-  it("throws when timeout exceeds max timeout", () => {
+  it("throws when backlogTimeout exceeds max timeout", () => {
     assert.throws(
       () =>
         makePartitionedBlockingLimiter<string>({
-          timeout: 60 * 60 * 1000 + 1,
+          backlogTimeout: 60 * 60 * 1000 + 1,
           limiter: { limit: new FixedLimit(1) },
           partitionResolver: (ctx) => ctx,
           partitions: { a: { percent: 1, delayMs: 0 } },
@@ -66,7 +66,7 @@ describe("makePartitionedBlockingLimiter", () => {
 
   it("unblocks multiple waiters on release", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },
@@ -86,7 +86,7 @@ describe("makePartitionedBlockingLimiter", () => {
 
   it("applies delay before blocking", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 40 } },
@@ -109,7 +109,7 @@ describe("makePartitionedBlockingLimiter", () => {
 
   it("returns undefined when aborted while waiting", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
-      timeout: 5_000,
+      backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },

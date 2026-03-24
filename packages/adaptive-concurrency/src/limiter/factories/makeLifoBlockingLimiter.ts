@@ -1,7 +1,4 @@
-import {
-  Limiter,
-  type LimiterOptions,
-} from "../../Limiter.js";
+import { Limiter, type LimiterOptions } from "../../Limiter.js";
 import {
   LifoBlockingRejection,
   type LifoBlockingRejectionOptions,
@@ -9,7 +6,7 @@ import {
 
 export function makeLifoBlockingLimiter<ContextT = void>(
   options: {
-    backlogSize?: number;
+    backlogSize?: LifoBlockingRejectionOptions<ContextT>["backlogSize"];
     backlogTimeout?: LifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
     limiter?: Omit<LimiterOptions<ContextT>, "allotmentUnavailableStrategy">;
   } = {},

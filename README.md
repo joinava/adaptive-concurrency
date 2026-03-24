@@ -29,7 +29,7 @@ npm i adaptive-concurrency
 
 #### Creating a Limiter
 
-The core type is **`Limiter`**: it combines an adaptive **`limit`** (e.g. `VegasLimit`), an optional **`bypassResolver`**, an **`acquireStrategy`** (default: semaphore-style permits), and an optional **`rejectionStrategy`** for blocking or queued behavior when no allotment is available.
+The core type is **`Limiter`**: it combines an adaptive **`limit`** (e.g. `VegasLimit`), an optional **`bypassResolver`**, an **`acquireStrategy`** (default: semaphore-style permits), and an optional **`allotmentUnavailableStrategy`** for blocking or queued behavior when no allotment is available.
 
 ```typescript
 import { Limiter, VegasLimit } from "adaptive-concurrency";
@@ -194,9 +194,9 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 
 ## Limiter building blocks
 
-- **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`rejectionStrategy`**.
+- **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**.
 - **`PartitionedStrategy`** — Percentage-based partitions (combine with `Limiter` via `acquireStrategy`). Per-partition reject delay is not configured here; use **`DelayedRejectStrategy`** and your own delay map keyed by partition.
-- **`FifoBlockingRejection` / `LifoBlockingRejection`** — When at capacity, wait on a promise (FIFO fair vs LIFO for tail latency).
+- **`FifoBlockingRejection` / `LifoBlockingRejection`** — When at capacity, wait on a promise (FIFO fair vs LIFO for tail latency). Both support `backlogSize` and `backlogTimeout` (`number` or `(context) => number`), and both proactively re-attempt draining on limit increases.
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
 
 ## Development

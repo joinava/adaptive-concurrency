@@ -1,14 +1,14 @@
-import {
-  Limiter,
-  type LimiterOptions,
-} from "../../Limiter.js";
-import { DelayedRejectStrategy } from "../allocation-unavailable-strategies/DelayedRejectStrategy.js";
-import { DelayedThenBlockingRejection } from "../allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
-import { FifoBlockingRejection } from "../allocation-unavailable-strategies/FifoBlockingRejection.js";
+import { Limiter, type LimiterOptions } from "../../Limiter.js";
 import {
   PartitionedStrategy,
   type PartitionConfig,
 } from "../acquire-strategies/PartitionedStrategy.js";
+import { DelayedRejectStrategy } from "../allocation-unavailable-strategies/DelayedRejectStrategy.js";
+import { DelayedThenBlockingRejection } from "../allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
+import {
+  FifoBlockingRejection,
+  type FifoBlockingRejectionOptions,
+} from "../allocation-unavailable-strategies/FifoBlockingRejection.js";
 
 export function makePartitionedBlockingLimiter<
   ContextT,
@@ -18,7 +18,8 @@ export function makePartitionedBlockingLimiter<
   partitions: Record<PartitionName, PartitionConfig & { delayMs?: number }>;
   limiter?: Omit<LimiterOptions<ContextT>, "acquireStrategy">;
   maxConcurrentDelays?: number;
-  timeout?: number;
+  backlogSize?: FifoBlockingRejectionOptions<ContextT>["backlogSize"];
+  backlogTimeout?: FifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
 }): Limiter<ContextT> {
   const limit = options.limiter?.limit ?? Limiter.makeDefaultLimit();
   const delayByPartition = new Map<PartitionName, number>(
@@ -47,7 +48,8 @@ export function makePartitionedBlockingLimiter<
         maxConcurrentDelays: options.maxConcurrentDelays,
       }),
       blockingStrategy: new FifoBlockingRejection<ContextT>({
-        timeout: options.timeout,
+        backlogSize: options.backlogSize,
+        backlogTimeout: options.backlogTimeout,
       }),
     }),
   });

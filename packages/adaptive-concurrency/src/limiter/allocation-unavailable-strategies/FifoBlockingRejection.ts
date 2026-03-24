@@ -1,12 +1,27 @@
-import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
-  AllotmentUnavailableStrategy,
   AcquireResult,
+  AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
+import {
+  LinkedWaiterQueue,
+  BlockingBacklogRejection,
+  MAX_TIMEOUT,
+} from "./BlockingBacklogRejection.js";
 
-type Waiter = () => void;
+export type FifoBlockingRejectionOptions<ContextT> = {
+  /**
+   * Maximum number of blocked callers in the backlog.
+   * Default: unbounded
+   */
+  backlogSize?: number | undefined;
 
-const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
+  /**
+   * Maximum timeout for callers blocked on the limiter, in milliseconds.
+   * Can be a fixed number or a function that derives the timeout from the
+   * request context (e.g. from a deadline). Default: 3_600_000 (1 hour).
+   */
+  backlogTimeout?: number | ((context: ContextT) => number) | undefined;
+};
 
 /**
  * Rejection strategy that blocks the caller in a FIFO queue when the limit
@@ -19,103 +34,29 @@ const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
 export class FifoBlockingRejection<
   ContextT,
 > implements AllotmentUnavailableStrategy<ContextT> {
-  private readonly timeout: number;
-  private readonly waiters: Array<Waiter> = [];
+  private readonly delegate: BlockingBacklogRejection<ContextT>;
 
-  constructor(
-    options: {
-      /**
-       * Maximum time in milliseconds to wait for a slot to become available.
-       * Default: 3_600_000 (1 hour).
-       */
-      timeout?: number | undefined;
-    } = {},
-  ) {
-    const t = options.timeout ?? MAX_TIMEOUT;
-    if (t > MAX_TIMEOUT) {
-      throw new Error(`Timeout cannot be greater than ${MAX_TIMEOUT} ms`);
-    }
-    this.timeout = t;
+  constructor(options: FifoBlockingRejectionOptions<ContextT> = {}) {
+    this.delegate = new BlockingBacklogRejection<ContextT>({
+      backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
+      backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
+      queue: new LinkedWaiterQueue("back"),
+    });
   }
 
   onAllotmentUnavailable(
-    _context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
-    signal?: AbortSignal,
-  ): Promise<LimitAllotment | undefined> {
-    return this.acquireAsync(_context, retry, signal);
-  }
-
-  onAllotmentReleased(): void {
-    const waiters = this.waiters.splice(0);
-    for (const waiter of waiters) {
-      waiter();
-    }
-  }
-
-  private async acquireAsync(
     context: ContextT,
     retry: (context: ContextT) => AcquireResult,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment | undefined> {
-    const deadline = performance.now() + this.timeout;
-
-    while (true) {
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) {
-        return undefined;
-      }
-
-      if (signal?.aborted) {
-        return undefined;
-      }
-
-      const allotment = await retry(context);
-      if (allotment) {
-        return allotment;
-      }
-
-      const acquired = await this.waitForRelease(remaining, signal);
-      if (!acquired) {
-        return undefined;
-      }
-    }
+  ) {
+    return this.delegate.onAllotmentUnavailable(context, retry, signal);
   }
 
-  private waitForRelease(
-    timeoutMs: number,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    if (signal?.aborted) {
-      return Promise.resolve(false);
-    }
+  onAllotmentReleased() {
+    return this.delegate.onAllotmentReleased();
+  }
 
-    return new Promise<boolean>((resolve) => {
-      let settled = false;
-      const settle = (acquired: boolean): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(acquired);
-      };
-
-      const waiter: Waiter = () => settle(true);
-      this.waiters.push(waiter);
-
-      const timer = setTimeout(() => settle(false), timeoutMs);
-      const onAbort = (): void => settle(false);
-
-      const cleanup = (): void => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-
-        const idx = this.waiters.indexOf(waiter);
-        if (idx !== -1) {
-          this.waiters.splice(idx, 1);
-        }
-      };
-
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
+  onLimitChanged(oldLimit: number, newLimit: number): void {
+    this.delegate.onLimitChanged(oldLimit, newLimit);
   }
 }

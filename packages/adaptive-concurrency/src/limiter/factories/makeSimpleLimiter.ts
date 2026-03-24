@@ -1,8 +1,5 @@
-import {
-  Limiter,
-  SemaphoreStrategy,
-  type LimiterOptions,
-} from "../../Limiter.js";
+import { Limiter, type LimiterOptions } from "../../Limiter.js";
+import { SemaphoreStrategy } from "../acquire-strategies/SemaphoreStrategy.js";
 
 export function makeSimpleLimiter<ContextT = void>(
   options: Omit<LimiterOptions<ContextT>, "acquireStrategy"> = {},

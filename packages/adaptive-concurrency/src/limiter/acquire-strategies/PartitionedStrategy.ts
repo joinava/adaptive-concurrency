@@ -14,6 +14,23 @@ export type PartitionConfig = {
    * [0.0, 1.0].
    */
   percent: number;
+
+  /**
+   * Controls whether this partition may exceed its limit-at-global-saturation
+   * while global inflight is still below the global limit.
+   *
+   * - `{ kind: "unbounded" }` (default): current behavior; any partition may
+   *   consume all global slack.
+   * - `{ kind: "capped", maxBurstMultiplier }`: partition may burst, but only
+   *   up to `ceil(limitAtGlobalSaturation * maxBurstMultiplier)`.
+   * - `{ kind: "none" }`: no bursting; partition cannot exceed its
+   *   `limitAtGlobalSaturation`, even when global slack exists.
+   */
+  burstMode?:
+    | { kind: "unbounded" }
+    | { kind: "capped"; maxBurstMultiplier: number }
+    | { kind: "none" }
+    | undefined;
 };
 
 /**
@@ -25,9 +42,12 @@ export type PartitionConfig = {
  * max(1, ceil(globalLimit * percent))`.
  *
  * Admission policy:
- * - If `globalInflight < globalLimit`, the request is admitted regardless of
- *   its partition's current limitAtGlobalSaturation usage (bursting while slack
- *   exists).
+ * - If `globalInflight < globalLimit`, admission is controlled by partition
+ *   burst policy:
+ *   - `unbounded` (default): always admit while global slack exists.
+ *   - `capped`: admit up to
+ *     `ceil(limitAtGlobalSaturation * maxBurstMultiplier)`.
+ *   - `none`: admit only up to `limitAtGlobalSaturation`.
  *
  * - If `globalInflight >= globalLimit`, admission is checked against the
  *   resolved partition's limitAtGlobalSaturation only (`tryAcquire` on that
@@ -39,8 +59,7 @@ export type PartitionConfig = {
  *
  * Examples (global limit = 10, A=50%, B=50% => limitsAtGlobalSaturation: A=5,
  * B=5):
- * - **Bursting:** A can reach inflight 10 while B is 0 (below-saturation
- *   admissions do not enforce per-partition limits at global saturation).
+ * - **Unbounded bursting:** A can reach inflight 10 while B is 0.
  *
  * - **Limit-at-global-saturation catch-up at saturation:** if A=10 and B=0,
  *   then B requests can still be admitted up to B=5 via `tryAcquire`, so global
@@ -119,6 +138,7 @@ export class PartitionedStrategy<
         new Partition({
           name,
           percent: cfg.percent,
+          burstMode: cfg.burstMode ?? { kind: "unbounded" },
           initialLimitAtGlobalSaturation:
             partitionLimitAtGlobalSaturationForGlobal(
               initialLimit,
@@ -132,9 +152,9 @@ export class PartitionedStrategy<
     this.unknownPartition = new Partition({
       name: "unknown",
       percent: 0,
+      burstMode: { kind: "unbounded" },
       // Java never calls updateLimit on unknown; limitAtGlobalSaturation stays
-      // 0 so
-      // tryAcquire always fails at global cap.
+      // 0, so tryAcquire always fails at global saturation.
       initialLimitAtGlobalSaturation: 0,
       registry,
     });
@@ -146,8 +166,7 @@ export class PartitionedStrategy<
     if (state.inflight >= state.limit) {
       return partition.tryAcquire();
     }
-    partition.acquire();
-    return true;
+    return partition.acquireWithinBurst();
   }
 
   onAllotmentReleased(context: ContextT): void {
@@ -172,6 +191,7 @@ export class PartitionedStrategy<
     return {
       name: partition.name,
       percent: partition.percent,
+      burstMode: partition.burstMode,
       limitAtGlobalSaturation: partition.limitAtGlobalSaturation,
       inFlight: partition.inFlight,
       isLimitAtGlobalSaturationExceeded:
@@ -201,6 +221,10 @@ function partitionLimitAtGlobalSaturationForGlobal(
 class Partition<PartitionName extends string = string> {
   public readonly name: PartitionName;
   public readonly percent: number;
+  public readonly burstMode:
+    | { kind: "unbounded" }
+    | { kind: "capped"; maxBurstMultiplier: number }
+    | { kind: "none" };
   public readonly inflightDistribution: DistributionMetric;
   public readonly limitAtGlobalSaturationGauge: GaugeMetric;
 
@@ -210,6 +234,10 @@ class Partition<PartitionName extends string = string> {
   constructor(init: {
     name: PartitionName;
     percent: number;
+    burstMode:
+      | { kind: "unbounded" }
+      | { kind: "capped"; maxBurstMultiplier: number }
+      | { kind: "none" };
     /** Per-partition slot cap when the global limit is saturated. */
     initialLimitAtGlobalSaturation: number;
     registry: MetricRegistry;
@@ -219,7 +247,15 @@ class Partition<PartitionName extends string = string> {
     }
     this.name = init.name;
     this.percent = init.percent;
+    this.burstMode = init.burstMode;
     this._limitAtGlobalSaturation = init.initialLimitAtGlobalSaturation;
+
+    if (
+      this.burstMode.kind === "capped" &&
+      this.burstMode.maxBurstMultiplier < 1.0
+    ) {
+      throw new Error("maxBurstMultiplier must be >= 1.0");
+    }
 
     const registry = init.registry;
     this.inflightDistribution = registry.distribution(
@@ -261,6 +297,14 @@ class Partition<PartitionName extends string = string> {
     this.inflightDistribution.addSample(this._inflight);
   }
 
+  acquireWithinBurst(): boolean {
+    if (this._inflight >= this.burstCapBelowGlobalSaturation()) {
+      return false;
+    }
+    this.acquire();
+    return true;
+  }
+
   tryAcquire(): boolean {
     if (this._inflight < this._limitAtGlobalSaturation) {
       this._inflight++;
@@ -276,6 +320,23 @@ class Partition<PartitionName extends string = string> {
 
   get inFlight(): number {
     return this._inflight;
+  }
+
+  private burstCapBelowGlobalSaturation(): number {
+    if (this.burstMode.kind === "unbounded") {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    if (this.burstMode.kind === "none") {
+      return this._limitAtGlobalSaturation;
+    }
+
+    return Math.max(
+      this._limitAtGlobalSaturation,
+      Math.ceil(
+        this._limitAtGlobalSaturation * this.burstMode.maxBurstMultiplier,
+      ),
+    );
   }
 
   toString(): string {

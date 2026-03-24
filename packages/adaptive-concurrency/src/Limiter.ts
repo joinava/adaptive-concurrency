@@ -1,11 +1,12 @@
 import { GradientLimit } from "./limit/GradientLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import type { LimitAllotment } from "./LimitAllotment.js";
+import { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
 import type { Counter, MetricRegistry } from "./MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "./MetricRegistry.js";
 import {
-  isRunResult,
   isAdaptiveTimeoutError,
+  isRunResult,
   QuotaNotAvailable,
   type RunResult,
 } from "./RunResult.js";
@@ -19,7 +20,7 @@ export type AcquireResult = Promise<LimitAllotment | undefined>;
 
 export interface AcquireOptions<ContextT = void> {
   context?: ContextT;
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +94,12 @@ export interface AllotmentUnavailableStrategy<ContextT> {
    * Blocking strategies use this to wake queued waiters.
    */
   onAllotmentReleased(): MaybePromise<void>;
+
+  /**
+   * Called when the adaptive limit changes. Blocking strategies can use this to
+   * proactively drain queued waiters when capacity increases.
+   */
+  onLimitChanged?(oldLimit: number, newLimit: number): MaybePromise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +186,7 @@ export class Limiter<Context = void> {
       const oldLimit = this._limit;
       this._limit = newLimit;
       this.acquireStrategy.onLimitChanged?.(oldLimit, newLimit);
+      void this.rejectionStrategy?.onLimitChanged?.(oldLimit, newLimit);
     });
 
     const registry = options.metricRegistry ?? NoopMetricRegistry;
@@ -224,6 +232,10 @@ export class Limiter<Context = void> {
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       this.rejectedCounter.increment();
       if (this.rejectionStrategy) {
+        if (options?.signal?.aborted) {
+          return undefined;
+        }
+
         return this.rejectionStrategy.onAllotmentUnavailable(
           ctx,
           (retryCtx) => this.tryAcquireCore(retryCtx),
@@ -258,12 +270,7 @@ export class Limiter<Context = void> {
         this._inflight--;
         await this.acquireStrategy.onAllotmentReleased(ctx);
         this.successCounter.increment();
-        this.limitAlgorithm.addSample(
-          startTime,
-          rtt,
-          currentInflight,
-          false,
-        );
+        this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false);
         await this.rejectionStrategy?.onAllotmentReleased();
       },
       releaseAndIgnore: async () => {
@@ -278,12 +285,7 @@ export class Limiter<Context = void> {
         this._inflight--;
         await this.acquireStrategy.onAllotmentReleased(ctx);
         this.droppedCounter.increment();
-        this.limitAlgorithm.addSample(
-          startTime,
-          rtt,
-          currentInflight,
-          true,
-        );
+        this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true);
         await this.rejectionStrategy?.onAllotmentReleased();
       },
     };
@@ -295,37 +297,6 @@ export class Limiter<Context = void> {
 
   getInflight(): number {
     return this._inflight;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Built-in acquire strategy: Semaphore
-// ---------------------------------------------------------------------------
-
-/**
- * Simple semaphore-based acquire strategy. Tracks a permits counter that is
- * decremented when an allotment is taken and incremented on release. When
- * permits reach zero, {@link tryAcquireAllotment} returns false.
- */
-export class SemaphoreStrategy {
-  private permits: number;
-
-  constructor(initialLimit: number) {
-    this.permits = initialLimit;
-  }
-
-  tryAcquireAllotment(): boolean {
-    if (this.permits <= 0) return false;
-    this.permits--;
-    return true;
-  }
-
-  onAllotmentReleased(): void {
-    this.permits++;
-  }
-
-  onLimitChanged(oldLimit: number, newLimit: number): void {
-    this.permits += newLimit - oldLimit;
   }
 }
 
@@ -365,25 +336,29 @@ export interface LimitedFunction<ContextT> {
 export function withLimiter<ContextT>(
   limiter: Limiter<ContextT>,
 ): LimitedFunction<ContextT> {
+  type LimitedFn<T, E extends Error = Error> = (
+    args: RunCallbackArgs<ContextT>,
+  ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>;
+
   async function limited<T, E extends Error = Error>(
-    optionsOrFn:
-      | AcquireOptions<ContextT>
-      | ((
-          args: RunCallbackArgs<ContextT>,
-        ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>),
-    maybeFn?: (
-      args: RunCallbackArgs<ContextT>,
-    ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>,
+    fn: LimitedFn<T, E>,
+  ): Promise<T | typeof QuotaNotAvailable>;
+  async function limited<T, E extends Error = Error>(
+    options: AcquireOptions<ContextT>,
+    fn: LimitedFn<T, E>,
+  ): Promise<T | typeof QuotaNotAvailable>;
+  async function limited<T, E extends Error = Error>(
+    optionsOrFn: AcquireOptions<ContextT> | LimitedFn<T, E>,
+    maybeFn?: LimitedFn<T, E>,
   ): Promise<T | typeof QuotaNotAvailable> {
-    const hasOptions = maybeFn !== undefined;
-    const options = hasOptions
-      ? (optionsOrFn as AcquireOptions<ContextT>)
-      : undefined;
-    const fn = hasOptions
-      ? maybeFn!
-      : (optionsOrFn as (
-          args: RunCallbackArgs<ContextT>,
-        ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>);
+    const [options, fn] =
+      typeof optionsOrFn === "function"
+        ? [undefined, optionsOrFn]
+        : [optionsOrFn, maybeFn];
+
+    if (!fn) {
+      throw new Error("No function provided");
+    }
 
     const allotment = await limiter.acquire(options);
     if (!allotment) {
@@ -391,10 +366,7 @@ export function withLimiter<ContextT>(
     }
 
     const [result] = await Promise.allSettled([
-      fn({
-        context: options?.context,
-        signal: options?.signal,
-      }),
+      fn({ context: options?.context, signal: options?.signal }),
     ]);
 
     if (result.status === "rejected") {
@@ -409,19 +381,23 @@ export function withLimiter<ContextT>(
     const outcome = result.value;
     if (!isRunResult(outcome)) {
       await allotment.releaseAndRecordSuccess();
-      return outcome as T;
+      return outcome;
     }
 
-    switch (outcome.kind) {
+    const outcomeCast = outcome satisfies
+      | Awaited<T>
+      | RunResult<T, E> as RunResult<T, E>;
+
+    switch (outcomeCast.kind) {
       case "success":
         await allotment.releaseAndRecordSuccess();
-        return outcome.value;
+        return outcomeCast.value;
       case "ignore":
         await allotment.releaseAndIgnore();
-        return outcome.value;
+        return outcomeCast.value;
       case "dropped":
         await allotment.releaseAndRecordDropped();
-        throw outcome.error;
+        throw outcomeCast.error;
     }
   }
 

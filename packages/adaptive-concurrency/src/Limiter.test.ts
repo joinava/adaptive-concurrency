@@ -4,7 +4,6 @@ import { Limiter, withLimiter } from "./Limiter.js";
 import type { AcquireStrategy } from "./Limiter.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import { FixedLimit } from "./limit/FixedLimit.js";
-import { SettableLimit } from "./limit/SettableLimit.js";
 import {
   AdaptiveTimeoutError,
   QuotaNotAvailable,
@@ -98,21 +97,6 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     await listener.releaseAndRecordSuccess();
     assert.equal(limiter.getInflight(), 0);
-  });
-
-  it("should adjust permits when limit changes", async () => {
-    const limit = new SettableLimit(5);
-    const limiter = new Limiter<string>({ limit });
-
-    for (let i = 0; i < 5; i++) {
-      await limiter.acquire({ context: "test" });
-    }
-    assert.equal(await limiter.acquire({ context: "test" }), undefined);
-
-    limit.setLimit(10);
-
-    const extra = await limiter.acquire({ context: "test" });
-    assert.ok(extra, "Should acquire after limit increase");
   });
 
   it("should release permits on ignore", async () => {

@@ -91,4 +91,27 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
 
     assert.equal(await waiting, undefined);
   });
+
+  it("throws when backlogTimeout exceeds max timeout", async () => {
+    assert.throws(
+      () =>
+        makeLifoBlockingLimiter<string>({
+          backlogTimeout: 60 * 60 * 1000 + 1,
+          limiter: { limit: new FixedLimit(1) },
+        }),
+      /Timeout cannot be greater than/,
+    );
+
+    const limiter = makeLifoBlockingLimiter<string>({
+      backlogTimeout: () => 60 * 60 * 1000 + 1,
+      limiter: { limit: new FixedLimit(1) },
+    });
+    const first = await limiter.acquire({ context: "inflight" });
+    assert.ok(first);
+
+    await assert.rejects(
+      limiter.acquire({ context: "blocked" }),
+      /Timeout cannot be greater than/,
+    );
+  });
 });

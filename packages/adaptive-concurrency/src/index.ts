@@ -3,7 +3,6 @@ export type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 export type { LimitAllotment } from "./LimitAllotment.js";
 export {
   Limiter,
-  SemaphoreStrategy,
   withLimiter,
   type AcquireOptions,
   type AcquireResult,
@@ -12,8 +11,8 @@ export {
   type LimitedFunction,
   type LimiterOptions,
   type LimiterState,
-  type RunCallbackArgs,
   type MaybePromise,
+  type RunCallbackArgs,
 } from "./Limiter.js";
 export { ListenerSet } from "./ListenerSet.js";
 export {
@@ -28,8 +27,8 @@ export {
   AdaptiveTimeoutError,
   dropped,
   ignore,
-  isRunResult,
   isAdaptiveTimeoutError,
+  isRunResult,
   QuotaNotAvailable,
   success,
   type RunDropped,
@@ -70,12 +69,14 @@ export type { SampleWindow } from "./limit/window/SampleWindow.js";
 // Limit functions
 export { squareRoot, squareRootWithBaseline } from "./utils/index.js";
 
-// Acquire strategies
 export * from "./limiter/factories/index.js";
+
+// Acquire strategies
 export {
   PartitionedStrategy,
   type PartitionConfig,
 } from "./limiter/acquire-strategies/PartitionedStrategy.js";
+export { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
 
 // Rejection strategies
 export {
