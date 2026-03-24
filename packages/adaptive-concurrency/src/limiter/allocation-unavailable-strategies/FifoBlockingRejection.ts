@@ -2,8 +2,8 @@ import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
+import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
 import {
-  LinkedWaiterQueue,
   BlockingBacklogRejection,
   MAX_TIMEOUT,
 } from "./BlockingBacklogRejection.js";
