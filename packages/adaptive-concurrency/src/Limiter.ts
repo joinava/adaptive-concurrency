@@ -279,41 +279,69 @@ export class Limiter<Context = void> {
     // no-op. This simplifies a lot of cleanup handling etc that'd otherwise be
     // much racier/more complicated. It could hide subtle correctness issue, but
     // should be more valuable as defense-in-depth.
-    let released = false;
+    let releaseStarted = false;
 
     return {
       releaseAndRecordSuccess: async () => {
-        if (released) return;
-        released = true;
+        if (releaseStarted) return;
+        releaseStarted = true;
 
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
-        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.successCounter.increment();
-        this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false);
-        await this.rejectionStrategy?.onAllotmentReleased();
+
+        // If one onAllotmentReleased call fails, hard to know what to do here.
+        // We're in some kind of inconsistent state, but we probably have to
+        // soldier on.
+        try {
+          await this.acquireStrategy.onAllotmentReleased(ctx);
+        } catch {}
+        try {
+          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false);
+        } catch {}
+        try {
+          await this.rejectionStrategy?.onAllotmentReleased();
+        } catch {}
       },
       releaseAndIgnore: async () => {
-        if (released) return;
-        released = true;
+        if (releaseStarted) return;
+        releaseStarted = true;
 
         this._inflight--;
-        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.ignoredCounter.increment();
-        await this.rejectionStrategy?.onAllotmentReleased();
+
+        // If one onAllotmentReleased call fails, hard to know what to do here.
+        // We're in some kind of inconsistent state, but we probably have to
+        // soldier on.
+        try {
+          await this.acquireStrategy.onAllotmentReleased(ctx);
+        } catch {}
+        try {
+          await this.rejectionStrategy?.onAllotmentReleased();
+        } catch {}
       },
       releaseAndRecordDropped: async () => {
-        if (released) return;
-        released = true;
+        if (releaseStarted) return;
+        releaseStarted = true;
 
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
-        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.droppedCounter.increment();
-        this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true);
-        await this.rejectionStrategy?.onAllotmentReleased();
+
+        // If one onAllotmentReleased call fails, hard to know what to do here.
+        // We're in some kind of inconsistent state, but we probably have to
+        // soldier on.
+        try {
+          await this.acquireStrategy.onAllotmentReleased(ctx);
+        } catch {}
+        try {
+          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true);
+        } catch {}
+        try {
+          await this.rejectionStrategy?.onAllotmentReleased();
+        } catch {}
       },
     };
   }

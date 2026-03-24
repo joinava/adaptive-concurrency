@@ -1,10 +1,14 @@
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Limiter, withLimiter } from "./Limiter.js";
-import type { AcquireStrategy, AllotmentUnavailableStrategy } from "./Limiter.js";
-import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
+import { describe, it } from "node:test";
 import { FixedLimit } from "./limit/FixedLimit.js";
 import { SettableLimit } from "./limit/SettableLimit.js";
+import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
+import type {
+  AcquireStrategy,
+  AllotmentUnavailableStrategy,
+} from "./Limiter.js";
+import { Limiter, withLimiter } from "./Limiter.js";
+import { FifoBlockingRejection } from "./limiter/allocation-unavailable-strategies/FifoBlockingRejection.js";
 import {
   AdaptiveTimeoutError,
   QuotaNotAvailable,
@@ -72,7 +76,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       await limiter.acquire({ context: "internal-health" }),
       "Internal request should bypass",
     );
-    assert.ok(await limiter.acquire({ context: "admin" }), "Admin should bypass");
+    assert.ok(
+      await limiter.acquire({ context: "admin" }),
+      "Admin should bypass",
+    );
   });
 
   it("should not bypass when no resolver is configured", async () => {
@@ -348,13 +355,265 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       const limited = withLimiter(limiter);
       const signal = new AbortController().signal;
 
-      const out = await limited({ context: "tenant-a", signal }, ({ context, signal: cbSignal }) => {
-        assert.equal(context, "tenant-a");
-        assert.equal(cbSignal, signal);
-        return success("ok");
-      });
+      const out = await limited(
+        { context: "tenant-a", signal },
+        ({ context, signal: cbSignal }) => {
+          assert.equal(context, "tenant-a");
+          assert.equal(cbSignal, signal);
+          return success("ok");
+        },
+      );
 
       assert.equal(out, "ok");
+    });
+  });
+
+  describe("idempotent allotment release", () => {
+    it("calling releaseAndRecordSuccess twice does not double-decrement inflight", async () => {
+      const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
+      const a = await limiter.acquire({});
+      assert.ok(a);
+
+      assert.equal(limiter.getInflight(), 1);
+      await a.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0);
+      await a.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0, "second call should be a no-op");
+    });
+
+    it("calling releaseAndIgnore twice does not double-decrement inflight", async () => {
+      const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
+      const a = await limiter.acquire({});
+      assert.ok(a);
+
+      await a.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0);
+      await a.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0, "second call should be a no-op");
+    });
+
+    it("calling releaseAndRecordDropped twice does not double-decrement inflight", async () => {
+      const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
+      const a = await limiter.acquire({});
+      assert.ok(a);
+
+      await a.releaseAndRecordDropped();
+      assert.equal(limiter.getInflight(), 0);
+      await a.releaseAndRecordDropped();
+      assert.equal(limiter.getInflight(), 0, "second call should be a no-op");
+    });
+
+    it("calling different release methods on the same allotment only runs the first", async () => {
+      const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
+      const a = await limiter.acquire({});
+      assert.ok(a);
+
+      assert.equal(limiter.getInflight(), 1);
+      await a.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0);
+
+      await a.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0, "should not decrement again");
+
+      await a.releaseAndRecordDropped();
+      assert.equal(limiter.getInflight(), 0, "should not decrement again");
+    });
+
+    it("idempotent release does not double-release semaphore permits", async () => {
+      const limiter = new Limiter<void>({ limit: new FixedLimit(1) });
+      const a = await limiter.acquire({});
+      assert.ok(a);
+
+      await a.releaseAndRecordSuccess();
+      await a.releaseAndRecordSuccess();
+
+      // Only one slot should be available
+      const b = await limiter.acquire({});
+      assert.ok(b);
+      assert.equal(
+        await limiter.acquire({}),
+        undefined,
+        "only 1 slot available, not 2 from double-release",
+      );
+      await b.releaseAndRecordSuccess();
+    });
+  });
+
+  describe("abort signal", () => {
+    it("returns undefined when signal is already aborted before acquire", async () => {
+      const limiter = new Limiter<void>({ limit: new FixedLimit(10) });
+      const ac = new AbortController();
+      ac.abort();
+
+      const result = await limiter.acquire({ signal: ac.signal });
+      assert.equal(result, undefined);
+      assert.equal(limiter.getInflight(), 0);
+    });
+
+    it("cleans up acquired allotment if signal aborts during tryAcquireAllotment await", async () => {
+      const ac = new AbortController();
+      let resolveAcquire: ((v: boolean) => void) | undefined;
+
+      const acquireStrategy: AcquireStrategy<void> = {
+        tryAcquireAllotment() {
+          return new Promise<boolean>((resolve) => {
+            resolveAcquire = resolve;
+          });
+        },
+        async onAllotmentReleased() {},
+      };
+
+      const limiter = new Limiter<void>({
+        limit: new FixedLimit(10),
+        acquireStrategy,
+      });
+
+      const acquirePromise = limiter.acquire({ signal: ac.signal });
+
+      // Abort while tryAcquireAllotment is pending
+      ac.abort();
+      resolveAcquire!(true);
+
+      const result = await acquirePromise;
+      assert.equal(result, undefined, "should return undefined after abort");
+      assert.equal(limiter.getInflight(), 0, "inflight should return to 0");
+    });
+
+    it("returns undefined when signal aborts before rejection strategy is entered", async () => {
+      const ac = new AbortController();
+      let retryCalled = false;
+
+      const limiter = new Limiter<void>({
+        limit: new FixedLimit(1),
+        allotmentUnavailableStrategy: {
+          onAllotmentUnavailable(_ctx, retry, signal) {
+            retryCalled = true;
+            return Promise.resolve(undefined);
+          },
+          onAllotmentReleased() {},
+        },
+      });
+
+      const holder = await limiter.acquire({});
+      assert.ok(holder);
+
+      // Abort after the acquire starts but the tryAcquireAllotment will fail
+      // The abort check happens between tryAcquireAllotment failing and entering
+      // the rejection strategy
+      ac.abort();
+      const result = await limiter.acquire({ signal: ac.signal });
+      assert.equal(result, undefined);
+      assert.equal(
+        retryCalled,
+        false,
+        "rejection strategy should not be entered",
+      );
+
+      await holder!.releaseAndRecordSuccess();
+    });
+
+    it("inflight stays consistent through abort+release cycles", async () => {
+      const limiter = new Limiter<void>({
+        limit: new FixedLimit(2),
+        allotmentUnavailableStrategy: new FifoBlockingRejection({
+          backlogTimeout: 5_000,
+        }),
+      });
+
+      const h1 = await limiter.acquire({});
+      const h2 = await limiter.acquire({});
+      assert.ok(h1);
+      assert.ok(h2);
+      assert.equal(limiter.getInflight(), 2);
+
+      const ac = new AbortController();
+      const abortedPromise = limiter.acquire({ signal: ac.signal });
+
+      ac.abort();
+      assert.equal(await abortedPromise, undefined);
+      assert.equal(
+        limiter.getInflight(),
+        2,
+        "aborted acquire should not affect inflight",
+      );
+
+      await h1!.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 1);
+
+      await h2!.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0);
+    });
+
+    it("does not leak permits when abort races with blocking acquire across multiple slots", async () => {
+      const limiter = new Limiter<void>({
+        limit: new FixedLimit(3),
+        allotmentUnavailableStrategy: new FifoBlockingRejection({
+          backlogTimeout: 5_000,
+          backlogSize: 10,
+        }),
+      });
+
+      const holders = await Promise.all([
+        limiter.acquire({}),
+        limiter.acquire({}),
+        limiter.acquire({}),
+      ]);
+      for (const h of holders) assert.ok(h);
+      assert.equal(limiter.getInflight(), 3);
+
+      const controllers = Array.from(
+        { length: 5 },
+        () => new AbortController(),
+      );
+      const abortPromises = controllers.map((ac) =>
+        limiter.acquire({ signal: ac.signal }),
+      );
+
+      for (const ac of controllers) ac.abort();
+      for (const p of abortPromises) assert.equal(await p, undefined);
+
+      assert.equal(limiter.getInflight(), 3);
+
+      for (const h of holders) await h!.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0);
+
+      // All 3 slots should be available
+      const fresh = await Promise.all([
+        limiter.acquire({}),
+        limiter.acquire({}),
+        limiter.acquire({}),
+      ]);
+      for (const f of fresh) assert.ok(f);
+      assert.equal(limiter.getInflight(), 3);
+      for (const f of fresh) await f!.releaseAndRecordSuccess();
+    });
+
+    it("abort during blocking wait does not prevent subsequent non-aborted acquires", async () => {
+      const limiter = new Limiter<void>({
+        limit: new FixedLimit(1),
+        allotmentUnavailableStrategy: new FifoBlockingRejection({
+          backlogTimeout: 5_000,
+        }),
+      });
+
+      const holder = await limiter.acquire({});
+      assert.ok(holder);
+
+      const ac = new AbortController();
+      const abortedPromise = limiter.acquire({ signal: ac.signal });
+
+      ac.abort();
+      assert.equal(await abortedPromise, undefined);
+
+      const nextPromise = limiter.acquire({});
+      await holder!.releaseAndRecordSuccess();
+
+      const next = await Promise.race([
+        nextPromise,
+        new Promise<undefined>((r) => setTimeout(() => r(undefined), 500)),
+      ]);
+      assert.ok(next, "non-aborted acquire should succeed after release");
+      await next!.releaseAndRecordSuccess();
     });
   });
 
