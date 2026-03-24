@@ -420,16 +420,31 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       assert.equal(limiter.getInflight(), 0, "should not decrement again");
     });
 
-    it("second release resolves without producing an unhandled rejection", async () => {
+    it("second release does not produce an unhandled rejection when fire-and-forget", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
       const a = await limiter.acquire({});
       assert.ok(a);
 
       await a.releaseAndIgnore();
 
-      const p = a.releaseAndIgnore();
-      assert.ok(p instanceof Promise, "release must return a Promise");
-      await p;
+      let unhandledRejection: unknown;
+      const onUnhandled = (reason: unknown) => {
+        unhandledRejection = reason;
+      };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        // Intentionally fire-and-forget: do not await
+        a.releaseAndIgnore();
+        // Allow microtasks and a macrotask tick to settle
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        assert.equal(
+          unhandledRejection,
+          undefined,
+          "duplicate release must not produce an unhandled rejection",
+        );
+      } finally {
+        process.removeListener("unhandledRejection", onUnhandled);
+      }
     });
 
     it("idempotent release does not double-release semaphore permits", async () => {
