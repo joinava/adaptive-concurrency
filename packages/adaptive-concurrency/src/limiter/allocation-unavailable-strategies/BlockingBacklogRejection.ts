@@ -171,7 +171,7 @@ export class BlockingBacklogRejection<
   }
 }
 
-export class ArrayWaiterQueue<
+export class LinkedWaiterQueue<
   WaiterT extends Waiter<any>,
 > implements WaiterQueue<WaiterT> {
   private head: LinkedNode<WaiterT> | undefined;

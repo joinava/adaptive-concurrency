@@ -3,7 +3,7 @@ import type {
   AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
 import {
-  ArrayWaiterQueue,
+  LinkedWaiterQueue,
   BlockingBacklogRejection,
   MAX_TIMEOUT,
 } from "./BlockingBacklogRejection.js";
@@ -40,7 +40,7 @@ export class FifoBlockingRejection<
     this.delegate = new BlockingBacklogRejection<ContextT>({
       backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
       backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
-      queue: new ArrayWaiterQueue("back"),
+      queue: new LinkedWaiterQueue("back"),
     });
   }
 
