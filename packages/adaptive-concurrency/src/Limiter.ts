@@ -232,24 +232,37 @@ export class Limiter<Context = void> {
 
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       this.rejectedCounter.increment();
-      if (this.rejectionStrategy) {
-        if (options?.signal?.aborted) {
-          return undefined;
-        }
-
-        return this.rejectionStrategy.onAllotmentUnavailable(
-          ctx,
-          (retryCtx) => this.tryAcquireCore(retryCtx),
-          options?.signal,
-        );
+      if (!this.rejectionStrategy) {
+        return undefined;
       }
+
+      // if signal aborted here, nothing to cleanup, as we didn't acquire anything.
+      if (options?.signal?.aborted) {
+        return undefined;
+      }
+
+      return this.rejectionStrategy.onAllotmentUnavailable(
+        ctx,
+        (retryCtx) => this.tryAcquireCore(retryCtx, options?.signal),
+        options?.signal,
+      );
+    }
+
+    const allotment = this.createAllotment(ctx);
+
+    if (options?.signal?.aborted) {
+      // here, we did acquire, so we need to try to cleanup.
+      await allotment.releaseAndIgnore();
       return undefined;
     }
 
-    return this.createAllotment(ctx);
+    return allotment;
   }
 
-  private async tryAcquireCore(ctx: Context): AcquireResult {
+  private async tryAcquireCore(
+    ctx: Context,
+    signal?: AbortSignal,
+  ): AcquireResult {
     const state: LimiterState = {
       limit: this._limit,
       inflight: this._inflight,
@@ -257,15 +270,31 @@ export class Limiter<Context = void> {
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       return undefined;
     }
-    return this.createAllotment(ctx);
+
+    const allotment = this.createAllotment(ctx);
+    if (signal?.aborted) {
+      await allotment.releaseAndIgnore();
+      return undefined;
+    }
+
+    return allotment;
   }
 
   private createAllotment(ctx: Context): LimitAllotment {
     const startTime = this.clock();
     const currentInflight = ++this._inflight;
 
+    // Make sure an allotment can only be released once; future calls become a
+    // no-op. This simplifies a lot of cleanup handling etc that'd otherwise be
+    // much racier/more complicated. It could hide subtle correctness issue, but
+    // should be more valuable as defense-in-depth.
+    let released = false;
+
     return {
       releaseAndRecordSuccess: async () => {
+        if (released) return;
+        released = true;
+
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
@@ -275,12 +304,18 @@ export class Limiter<Context = void> {
         await this.rejectionStrategy?.onAllotmentReleased();
       },
       releaseAndIgnore: async () => {
+        if (released) return;
+        released = true;
+
         this._inflight--;
         await this.acquireStrategy.onAllotmentReleased(ctx);
         this.ignoredCounter.increment();
         await this.rejectionStrategy?.onAllotmentReleased();
       },
       releaseAndRecordDropped: async () => {
+        if (released) return;
+        released = true;
+
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
