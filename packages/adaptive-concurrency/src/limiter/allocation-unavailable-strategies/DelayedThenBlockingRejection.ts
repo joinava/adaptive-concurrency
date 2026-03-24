@@ -50,4 +50,8 @@ export class DelayedThenBlockingRejection<
     await this.delayStrategy.onAllotmentReleased();
     await this.blockingStrategy.onAllotmentReleased();
   }
+
+  onLimitChanged(oldLimit: number, newLimit: number): void {
+    this.blockingStrategy.onLimitChanged?.(oldLimit, newLimit);
+  }
 }

@@ -57,6 +57,29 @@ describe("DelayedThenBlockingRejection", () => {
     assert.equal(releaseCalls, 1);
   });
 
+  it("forwards onLimitChanged to blocking strategy", () => {
+    const limitChanges: Array<{ oldLimit: number; newLimit: number }> = [];
+    const blocking: AllotmentUnavailableStrategy<string> = {
+      onAllotmentUnavailable() {
+        return Promise.resolve(undefined);
+      },
+      onAllotmentReleased() {},
+      onLimitChanged(oldLimit, newLimit) {
+        limitChanges.push({ oldLimit, newLimit });
+      },
+    };
+
+    const strategy = new DelayedThenBlockingRejection<string>({
+      delayStrategy: new DelayedRejectStrategy<string>({
+        delayMsForContext: () => 0,
+      }),
+      blockingStrategy: blocking,
+    });
+
+    strategy.onLimitChanged(2, 5);
+    assert.deepEqual(limitChanges, [{ oldLimit: 2, newLimit: 5 }]);
+  });
+
   it("returns delegate allotment result after delay", async () => {
     const allotment: LimitAllotment = {
       async releaseAndRecordSuccess() {},
