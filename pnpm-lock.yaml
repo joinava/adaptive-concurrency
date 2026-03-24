@@ -28,8 +28,8 @@ importers:
         specifier: ^0.7.3
         version: 0.7.3
       typescript:
-        specifier: next
-        version: 6.0.0-dev.20260323
+        specifier: ^6.0.2
+        version: 6.0.2
 
   packages/http:
     dependencies:
@@ -44,8 +44,8 @@ importers:
         specifier: ^4.19.0
         version: 4.21.0
       typescript:
-        specifier: next
-        version: 6.0.0-dev.20260323
+        specifier: ^6.0.2
+        version: 6.0.2
 
 packages:
 
@@ -249,8 +249,8 @@ packages:
   type-party@0.7.3:
     resolution: {integrity: sha512-6IuzC5bi896TXv23XuN2b5eGPMX+KeU40fKz0QlEeT/qeaafG+pZa1ArhprSCufQ/aej9K1RZF930by0if+UyA==}
 
-  typescript@6.0.0-dev.20260323:
-    resolution: {integrity: sha512-nCvhfEJAUm4YK06mVZUCgwdCFT0ArNJlR4KYBcspKNvh+mAsNKNSTQ2NvYxQKV9mPFoey03HpO86XqxKhlOeFA==}
+  typescript@6.0.2:
+    resolution: {integrity: sha512-bGdAIrZ0wiGDo5l8c++HWtbaNCWTS4UTv7RaTH/ThVIgjkveJt83m74bBHMJkuCbslY8ixgLBVZJIOiQlQTjfQ==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -401,6 +401,6 @@ snapshots:
       safe-stable-stringify: 2.5.0
       type-fest: 5.5.0
 
-  typescript@6.0.0-dev.20260323: {}
+  typescript@6.0.2: {}
 
   undici-types@6.21.0: {}
