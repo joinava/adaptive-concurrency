@@ -9,7 +9,7 @@
     "dynamic rate limiting"
   ],
   "author": "Ethan Resnick <ethan.resnick@gmail.com>",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "type": "module",
   "exports": {
     ".": {
