@@ -70,6 +70,43 @@ describe("Blocking backlog rejection strategies", () => {
       );
     });
 
+    it("should throw when backlogTimeout is NaN", () => {
+      assert.throws(
+        () => new FifoBlockingRejection({ backlogTimeout: NaN }),
+        /Timeout must be a finite number/,
+      );
+    });
+
+    it("should throw when backlogTimeout is Infinity", () => {
+      assert.throws(
+        () => new FifoBlockingRejection({ backlogTimeout: Infinity }),
+        /Timeout must be a finite number/,
+      );
+    });
+
+    it("should throw when backlogTimeout is negative", () => {
+      assert.throws(
+        () => new FifoBlockingRejection({ backlogTimeout: -1 }),
+        /Timeout must be a finite number/,
+      );
+    });
+
+    it("should throw when context-derived backlogTimeout is NaN", async () => {
+      const limiter = new Limiter<{ timeoutMs: number }>({
+        limit: new FixedLimit(1),
+        allotmentUnavailableStrategy: new FifoBlockingRejection({
+          backlogTimeout: (ctx) => ctx.timeoutMs,
+        }),
+      });
+
+      const first = await limiter.acquire({ context: { timeoutMs: 5_000 } });
+      await assert.rejects(
+        () => limiter.acquire({ context: { timeoutMs: NaN } }),
+        /Timeout must be a finite number/,
+      );
+      await first!.releaseAndRecordSuccess();
+    });
+
     it("should unblock multiple waiters on release", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
