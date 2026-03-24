@@ -21,3 +21,9 @@ export function squareRoot(n: number): number {
 export function squareRootWithBaseline(baseline: number): (n: number) => number {
   return (n) => Math.max(baseline, squareRoot(n));
 }
+
+export {
+  LinkedWaiterQueue,
+  type EnqueueDirection,
+  type WaiterHandle,
+} from "./LinkedWaiterQueue.js";

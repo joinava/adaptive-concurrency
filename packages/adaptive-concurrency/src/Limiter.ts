@@ -232,21 +232,36 @@ export class Limiter<Context = void> {
 
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       this.rejectedCounter.increment();
-      if (this.rejectionStrategy) {
-        if (options?.signal?.aborted) {
-          return undefined;
-        }
-
-        return this.rejectionStrategy.onAllotmentUnavailable(
-          ctx,
-          (retryCtx) => this.tryAcquireCore(retryCtx),
-          options?.signal,
-        );
+      if (!this.rejectionStrategy) {
+        return undefined;
       }
+
+      // if signal aborted here, nothing to cleanup, as we didn't acquire anything.
+      if (options?.signal?.aborted) {
+        return undefined;
+      }
+
+      return this.rejectionStrategy.onAllotmentUnavailable(
+        ctx,
+        async (retryCtx) => {
+          if (options?.signal?.aborted) {
+            return undefined;
+          }
+          return this.tryAcquireCore(retryCtx);
+        },
+        options?.signal,
+      );
+    }
+
+    const allotment = this.createAllotment(ctx);
+
+    if (options?.signal?.aborted) {
+      // here, we did acquire, so we need to try to cleanup.
+      await allotment.releaseAndIgnore();
       return undefined;
     }
 
-    return this.createAllotment(ctx);
+    return allotment;
   }
 
   private async tryAcquireCore(ctx: Context): AcquireResult {
@@ -257,6 +272,7 @@ export class Limiter<Context = void> {
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       return undefined;
     }
+
     return this.createAllotment(ctx);
   }
 
@@ -264,30 +280,73 @@ export class Limiter<Context = void> {
     const startTime = this.clock();
     const currentInflight = ++this._inflight;
 
+    // Make sure an allotment can only be released once; future calls become a
+    // no-op. This simplifies a lot of cleanup handling etc that'd otherwise be
+    // much racier/more complicated. It could hide subtle correctness issue, but
+    // should be more valuable as defense-in-depth.
+    let releaseStarted = false;
+
     return {
       releaseAndRecordSuccess: async () => {
+        if (releaseStarted) return;
+        releaseStarted = true;
+
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
-        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.successCounter.increment();
-        this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false);
-        await this.rejectionStrategy?.onAllotmentReleased();
+
+        // If one onAllotmentReleased call fails, hard to know what to do here.
+        // We're in some kind of inconsistent state, but we probably have to
+        // soldier on.
+        try {
+          await this.acquireStrategy.onAllotmentReleased(ctx);
+        } catch {}
+        try {
+          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false);
+        } catch {}
+        try {
+          await this.rejectionStrategy?.onAllotmentReleased();
+        } catch {}
       },
       releaseAndIgnore: async () => {
+        if (releaseStarted) return;
+        releaseStarted = true;
+
         this._inflight--;
-        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.ignoredCounter.increment();
-        await this.rejectionStrategy?.onAllotmentReleased();
+
+        // If one onAllotmentReleased call fails, hard to know what to do here.
+        // We're in some kind of inconsistent state, but we probably have to
+        // soldier on.
+        try {
+          await this.acquireStrategy.onAllotmentReleased(ctx);
+        } catch {}
+        try {
+          await this.rejectionStrategy?.onAllotmentReleased();
+        } catch {}
       },
       releaseAndRecordDropped: async () => {
+        if (releaseStarted) return;
+        releaseStarted = true;
+
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
-        await this.acquireStrategy.onAllotmentReleased(ctx);
         this.droppedCounter.increment();
-        this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true);
-        await this.rejectionStrategy?.onAllotmentReleased();
+
+        // If one onAllotmentReleased call fails, hard to know what to do here.
+        // We're in some kind of inconsistent state, but we probably have to
+        // soldier on.
+        try {
+          await this.acquireStrategy.onAllotmentReleased(ctx);
+        } catch {}
+        try {
+          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true);
+        } catch {}
+        try {
+          await this.rejectionStrategy?.onAllotmentReleased();
+        } catch {}
       },
     };
   }
