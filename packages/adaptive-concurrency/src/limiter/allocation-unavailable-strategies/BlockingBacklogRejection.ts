@@ -40,9 +40,12 @@ export class BlockingBacklogRejection<
 
   constructor(options: BlockingBacklogRejectionOptions<ContextT>) {
     const backlogSize = options.backlogSize;
-    if (Number.isNaN(backlogSize) || backlogSize < 0) {
+    if (
+      backlogSize !== Number.POSITIVE_INFINITY &&
+      (!Number.isFinite(backlogSize) || backlogSize < 0)
+    ) {
       throw new RangeError(
-        "BlockingBacklogRejection: backlogSize must be a non-NaN number greater than or equal to 0",
+        "BlockingBacklogRejection: backlogSize must be a finite number greater than or equal to 0, or Infinity",
       );
     }
 

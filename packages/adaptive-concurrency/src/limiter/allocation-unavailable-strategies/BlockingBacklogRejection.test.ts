@@ -10,6 +10,10 @@ import { LifoBlockingRejection } from "./LifoBlockingRejection.js";
 
 describe("Blocking backlog rejection strategies", () => {
   describe("FifoBlockingRejection", () => {
+    it("accepts default unbounded backlog size", () => {
+      assert.doesNotThrow(() => new FifoBlockingRejection<void>());
+    });
+
     it("should acquire immediately when under limit", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(10),
