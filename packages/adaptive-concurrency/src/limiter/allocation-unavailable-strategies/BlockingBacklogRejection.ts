@@ -39,7 +39,14 @@ export class BlockingBacklogRejection<
   private drainInProgress = false;
 
   constructor(options: BlockingBacklogRejectionOptions<ContextT>) {
-    this.backlogSize = options.backlogSize;
+    const backlogSize = options.backlogSize;
+    if (!Number.isFinite(backlogSize) || backlogSize < 0) {
+      throw new RangeError(
+        "BlockingBacklogRejection: backlogSize must be a finite number greater than or equal to 0",
+      );
+    }
+
+    this.backlogSize = backlogSize;
     this.queue = options.queue;
 
     const backlogTimeout = options.backlogTimeout;
