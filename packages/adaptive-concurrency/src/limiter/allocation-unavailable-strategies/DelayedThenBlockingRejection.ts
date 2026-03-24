@@ -43,10 +43,7 @@ export class DelayedThenBlockingRejection<
       return undefined;
     }
 
-    return (
-      allotment ??
-      this.blockingStrategy.onAllotmentUnavailable(context, retry, signal)
-    );
+    return this.blockingStrategy.onAllotmentUnavailable(context, retry, signal);
   }
 
   async onAllotmentReleased(): Promise<void> {
