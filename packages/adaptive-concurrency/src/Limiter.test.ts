@@ -143,6 +143,79 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     assert.deepEqual(limitChanges, [{ oldLimit: 2, newLimit: 4 }]);
   });
+
+  describe("double-release guard", () => {
+    it("calling releaseAndIgnore twice does not make inflight go negative", async () => {
+      const limiter = new Limiter<string>({ limit: new FixedLimit(2) });
+
+      const allotment = (await limiter.acquire({ context: "test" }))!;
+      assert.equal(limiter.getInflight(), 1);
+
+      await allotment.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0);
+
+      // Second call must be a no-op.
+      await allotment.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0, "inflight must not go negative");
+
+      // The slot should still be available, not double-freed.
+      const next = await limiter.acquire({ context: "test" });
+      assert.ok(next);
+    });
+
+    it("calling releaseAndIgnore then releaseAndRecordSuccess does not make inflight go negative", async () => {
+      const limiter = new Limiter<string>({ limit: new FixedLimit(2) });
+
+      const allotment = (await limiter.acquire({ context: "test" }))!;
+      assert.equal(limiter.getInflight(), 1);
+
+      await allotment.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0);
+
+      // Second release via a different method must also be a no-op.
+      await allotment.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0, "inflight must not go negative");
+    });
+
+    it("calling releaseAndRecordSuccess twice does not make inflight go negative", async () => {
+      const limiter = new Limiter<string>({ limit: new FixedLimit(2) });
+
+      const allotment = (await limiter.acquire({ context: "test" }))!;
+      assert.equal(limiter.getInflight(), 1);
+
+      await allotment.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0);
+
+      await allotment.releaseAndRecordSuccess();
+      assert.equal(limiter.getInflight(), 0, "inflight must not go negative");
+    });
+
+    it("calling releaseAndRecordDropped then releaseAndIgnore does not make inflight go negative", async () => {
+      const limiter = new Limiter<string>({ limit: new FixedLimit(2) });
+
+      const allotment = (await limiter.acquire({ context: "test" }))!;
+      assert.equal(limiter.getInflight(), 1);
+
+      await allotment.releaseAndRecordDropped();
+      assert.equal(limiter.getInflight(), 0);
+
+      await allotment.releaseAndIgnore();
+      assert.equal(limiter.getInflight(), 0, "inflight must not go negative");
+    });
+
+    it("second release call does not produce an unhandled rejection", async () => {
+      const limiter = new Limiter<string>({ limit: new FixedLimit(2) });
+      const allotment = (await limiter.acquire({ context: "test" }))!;
+
+      await allotment.releaseAndIgnore();
+
+      // Fire-and-forget second release; any unhandled rejection would surface
+      // as a test failure via the process 'unhandledRejection' hook.
+      const p = allotment.releaseAndIgnore();
+      assert.ok(p instanceof Promise, "release must return a Promise");
+      await p; // must resolve, not reject
+    });
+  });
   it("should release permits on ignore", async () => {
     const limiter = new Limiter<string>({
       limit: new FixedLimit(1),
