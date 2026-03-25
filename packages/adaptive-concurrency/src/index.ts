@@ -66,8 +66,11 @@ export { makeAverageSampleWindow } from "./limit/window/AverageSampleWindow.js";
 export { createPercentileSampleWindow } from "./limit/window/PercentileSampleWindow.js";
 export type { SampleWindow } from "./limit/window/SampleWindow.js";
 
-// Limit functions
-export { squareRoot, squareRootWithBaseline } from "./utils/index.js";
+export {
+  LinkedWaiterQueue,
+  squareRoot,
+  squareRootWithBaseline,
+} from "./utils/index.js";
 
 export * from "./limiter/factories/index.js";
 
