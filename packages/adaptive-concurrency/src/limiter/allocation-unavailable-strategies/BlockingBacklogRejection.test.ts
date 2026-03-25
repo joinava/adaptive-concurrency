@@ -5,19 +5,50 @@ import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import type { AcquireResult } from "../../Limiter.js";
 import { Limiter } from "../../Limiter.js";
-import { FifoBlockingRejection } from "./FifoBlockingRejection.js";
-import { LifoBlockingRejection } from "./LifoBlockingRejection.js";
+import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
+import {
+  BlockingBacklogRejection,
+  MAX_TIMEOUT,
+  type BlockingBacklogRejectionOptions,
+} from "./BlockingBacklogRejection.js";
+
+type BlockingOptions<ContextT> = Partial<
+  Pick<
+    BlockingBacklogRejectionOptions<ContextT>,
+    "backlogSize" | "backlogTimeout"
+  >
+>;
+
+function makeFifoBlockingRejection<ContextT>(
+  options: BlockingOptions<ContextT> = {},
+): BlockingBacklogRejection<ContextT> {
+  return new BlockingBacklogRejection<ContextT>({
+    backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
+    backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
+    queue: new LinkedWaiterQueue("back"),
+  });
+}
+
+function makeLifoBlockingRejection<ContextT>(
+  options: BlockingOptions<ContextT> = {},
+): BlockingBacklogRejection<ContextT> {
+  return new BlockingBacklogRejection<ContextT>({
+    backlogSize: options.backlogSize ?? 100,
+    backlogTimeout: options.backlogTimeout ?? 1_000,
+    queue: new LinkedWaiterQueue("front"),
+  });
+}
 
 describe("Blocking backlog rejection strategies", () => {
   describe("FifoBlockingRejection", () => {
     it("accepts default unbounded backlog size", () => {
-      assert.doesNotThrow(() => new FifoBlockingRejection<void>());
+      assert.doesNotThrow(() => makeFifoBlockingRejection<void>());
     });
 
     it("should acquire immediately when under limit", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(10),
-        allotmentUnavailableStrategy: new FifoBlockingRejection(),
+        allotmentUnavailableStrategy: makeFifoBlockingRejection(),
       });
 
       const listener = await limiter.acquire({});
@@ -28,7 +59,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should block and then acquire when a token is released", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -48,7 +79,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should return undefined on backlog timeout", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 100,
         }),
       });
@@ -69,28 +100,28 @@ describe("Blocking backlog rejection strategies", () => {
 
     it("should throw when backlogTimeout exceeds MAX_TIMEOUT", () => {
       assert.throws(
-        () => new FifoBlockingRejection({ backlogTimeout: 60 * 60 * 1000 + 1 }),
+        () => makeFifoBlockingRejection({ backlogTimeout: MAX_TIMEOUT + 1 }),
         /Timeout cannot be greater than/,
       );
     });
 
     it("should throw when backlogTimeout is NaN", () => {
       assert.throws(
-        () => new FifoBlockingRejection({ backlogTimeout: NaN }),
+        () => makeFifoBlockingRejection({ backlogTimeout: NaN }),
         /Timeout must be a finite number/,
       );
     });
 
     it("should throw when backlogTimeout is Infinity", () => {
       assert.throws(
-        () => new FifoBlockingRejection({ backlogTimeout: Infinity }),
+        () => makeFifoBlockingRejection({ backlogTimeout: Infinity }),
         /Timeout must be a finite number/,
       );
     });
 
     it("should throw when backlogTimeout is negative", () => {
       assert.throws(
-        () => new FifoBlockingRejection({ backlogTimeout: -1 }),
+        () => makeFifoBlockingRejection({ backlogTimeout: -1 }),
         /Timeout must be a finite number/,
       );
     });
@@ -98,7 +129,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should throw when context-derived backlogTimeout is NaN", async () => {
       const limiter = new Limiter<{ timeoutMs: number }>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: (ctx) => ctx.timeoutMs,
         }),
       });
@@ -114,7 +145,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should unblock multiple waiters on release", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -136,7 +167,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should return undefined when aborted while waiting", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -159,7 +190,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should support context-derived backlog timeout", async () => {
       const limiter = new Limiter<{ timeoutMs: number }>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: (context) => context.timeoutMs,
         }),
       });
@@ -179,7 +210,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should return undefined when backlog is full", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogSize: 1,
           backlogTimeout: 5_000,
         }),
@@ -199,7 +230,7 @@ describe("Blocking backlog rejection strategies", () => {
     });
 
     it("should not call retry when signal is already aborted", async () => {
-      const strategy = new FifoBlockingRejection<void>({
+      const strategy = makeFifoBlockingRejection<void>({
         backlogTimeout: 5_000,
       });
       const abortController = new AbortController();
@@ -226,7 +257,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should remove aborted waiter from backlog", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogSize: 1,
           backlogTimeout: 5_000,
         }),
@@ -272,7 +303,7 @@ describe("Blocking backlog rejection strategies", () => {
         async releaseAndRecordDropped() {},
       };
 
-      const strategy = new FifoBlockingRejection<{
+      const strategy = makeFifoBlockingRejection<{
         id: "stale" | "fresh";
         timeoutMs: number;
       }>({
@@ -325,7 +356,7 @@ describe("Blocking backlog rejection strategies", () => {
       const limit = new SettableLimit(1);
       const limiter = new Limiter<void>({
         limit,
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -377,7 +408,7 @@ describe("Blocking backlog rejection strategies", () => {
           onAllotmentReleased() {},
           onLimitChanged() {},
         },
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -421,7 +452,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should serve remaining waiters after multiple aborts in sequence", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -454,7 +485,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should not stall when abort occurs right before release triggers drain", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -485,7 +516,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should handle abort of all queued waiters without leaking inflight", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -520,7 +551,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should handle timeout of head waiter followed by successful drain to next", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: (ctx) => ctx as unknown as number,
           backlogSize: 10,
         }),
@@ -556,7 +587,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should interleave abort and successful acquire without stalling", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(2),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -594,7 +625,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should handle abort after signal passed to acquire but before entering backlog", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -623,7 +654,7 @@ describe("Blocking backlog rejection strategies", () => {
         async releaseAndRecordDropped() {},
       };
 
-      const strategy = new FifoBlockingRejection<{
+      const strategy = makeFifoBlockingRejection<{
         id: string;
         timeoutMs: number;
       }>({
@@ -669,7 +700,7 @@ describe("Blocking backlog rejection strategies", () => {
 
   describe("LifoBlockingRejection", () => {
     it("returns undefined immediately when signal is already aborted", async () => {
-      const strategy = new LifoBlockingRejection<void>({
+      const strategy = makeLifoBlockingRejection<void>({
         backlogTimeout: 5_000,
       });
       const abortController = new AbortController();
@@ -713,7 +744,7 @@ describe("Blocking backlog rejection strategies", () => {
         async releaseAndRecordDropped() {},
       };
 
-      const strategy = new LifoBlockingRejection<{
+      const strategy = makeLifoBlockingRejection<{
         id: "fresh" | "stale";
         timeoutMs: number;
       }>({
@@ -768,7 +799,7 @@ describe("Blocking backlog rejection strategies", () => {
       const limit = new SettableLimit(1);
       const limiter = new Limiter<void>({
         limit,
-        allotmentUnavailableStrategy: new LifoBlockingRejection({
+        allotmentUnavailableStrategy: makeLifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -820,7 +851,7 @@ describe("Blocking backlog rejection strategies", () => {
           onAllotmentReleased() {},
           onLimitChanged() {},
         },
-        allotmentUnavailableStrategy: new LifoBlockingRejection({
+        allotmentUnavailableStrategy: makeLifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -862,7 +893,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should handle multiple aborts in LIFO order without stalling", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new LifoBlockingRejection({
+        allotmentUnavailableStrategy: makeLifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -895,7 +926,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should handle abort of all LIFO waiters without leaking inflight", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new LifoBlockingRejection({
+        allotmentUnavailableStrategy: makeLifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -926,7 +957,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should not stall when abort and release happen concurrently in LIFO", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new LifoBlockingRejection({
+        allotmentUnavailableStrategy: makeLifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -956,7 +987,7 @@ describe("Blocking backlog rejection strategies", () => {
     it("should handle timeout of head waiter followed by drain to older waiter", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new LifoBlockingRejection({
+        allotmentUnavailableStrategy: makeLifoBlockingRejection({
           backlogTimeout: (ctx) => ctx as unknown as number,
           backlogSize: 10,
         }),
@@ -1003,7 +1034,7 @@ describe("Blocking backlog rejection strategies", () => {
         async releaseAndRecordDropped() {},
       };
 
-      const strategy = new LifoBlockingRejection<{
+      const strategy = makeLifoBlockingRejection<{
         id: string;
         timeoutMs: number;
       }>({

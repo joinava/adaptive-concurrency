@@ -1,20 +1,18 @@
-export type WaiterHandle = {
-  key: symbol;
-};
+class ItemHandle {}
 
 export type EnqueueDirection = "front" | "back";
 
-type LinkedNode<WaiterT extends { handle: WaiterHandle }> = {
-  handle: WaiterHandle;
-  value: WaiterT;
-  prev: LinkedNode<WaiterT> | undefined;
-  next: LinkedNode<WaiterT> | undefined;
+type LinkedNode<T extends object> = {
+  handle: ItemHandle;
+  value: T;
+  prev: LinkedNode<T> | undefined;
+  next: LinkedNode<T> | undefined;
 };
 
-export class LinkedWaiterQueue<WaiterT extends { handle: WaiterHandle }> {
-  private head: LinkedNode<WaiterT> | undefined;
-  private tail: LinkedNode<WaiterT> | undefined;
-  private readonly nodes = new Map<symbol, LinkedNode<WaiterT>>();
+export class LinkedWaiterQueue<T extends object> {
+  private head: LinkedNode<T> | undefined;
+  private tail: LinkedNode<T> | undefined;
+  private readonly nodes = new Map<ItemHandle, LinkedNode<T>>();
   private readonly enqueueDirection: EnqueueDirection;
   private length = 0;
 
@@ -23,40 +21,43 @@ export class LinkedWaiterQueue<WaiterT extends { handle: WaiterHandle }> {
   }
 
   enqueue(
-    waiterWithoutHandle: Omit<WaiterT, "handle">,
+    value: T,
     enqueueDirection?: EnqueueDirection,
-  ): WaiterT {
-    const handle: WaiterHandle = { key: Symbol("waiter-node") };
-    const waiter: WaiterT = {
-      ...waiterWithoutHandle,
+  ): { value: T; handle: ItemHandle } {
+    const handle = new ItemHandle();
+
+    const node: LinkedNode<T> = {
       handle,
-    } as WaiterT;
-    const node: LinkedNode<WaiterT> = {
-      handle,
-      value: waiter,
+      value: value,
       prev: undefined,
       next: undefined,
     };
 
     const direction = enqueueDirection ?? this.enqueueDirection;
-    this.nodes.set(handle.key, node);
+    this.nodes.set(handle, node);
     if (direction === "front") {
       this.pushFront(node);
     } else {
       this.pushBack(node);
     }
     this.length += 1;
-    return waiter;
+    return { value, handle };
   }
 
-  peekHead(): WaiterT | undefined {
-    return this.head?.value;
+  peekHead(): { value: T; handle: ItemHandle } | undefined {
+    if (!this.head) {
+      return undefined;
+    }
+    return {
+      value: this.head.value,
+      handle: this.head.handle,
+    };
   }
 
-  removeByHandle(handle: WaiterHandle): boolean {
-    const node = this.nodes.get(handle.key);
+  removeByHandle(handle: ItemHandle): boolean {
+    const node = this.nodes.get(handle);
     if (!node) return false;
-    this.nodes.delete(handle.key);
+    this.nodes.delete(handle);
 
     if (node.prev) {
       node.prev.next = node.next;
@@ -80,7 +81,7 @@ export class LinkedWaiterQueue<WaiterT extends { handle: WaiterHandle }> {
     return this.length;
   }
 
-  private pushFront(node: LinkedNode<WaiterT>): void {
+  private pushFront(node: LinkedNode<T>): void {
     if (!this.head) {
       this.head = node;
       this.tail = node;
@@ -92,7 +93,7 @@ export class LinkedWaiterQueue<WaiterT extends { handle: WaiterHandle }> {
     this.head = node;
   }
 
-  private pushBack(node: LinkedNode<WaiterT>): void {
+  private pushBack(node: LinkedNode<T>): void {
     if (!this.tail) {
       this.head = node;
       this.tail = node;

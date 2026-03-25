@@ -3,40 +3,42 @@ import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
-import type { WaiterHandle } from "../../utils/LinkedWaiterQueue.js";
 
-type Waiter<ContextT> = {
+export type Waiter<ContextT> = {
   context: ContextT;
   retry: (context: ContextT) => AcquireResult;
-  handle: WaiterHandle;
   resolve: (allotment: LimitAllotment | undefined) => void;
 };
 
 export const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
 
-export type BlockingBacklogRejectionOptions<ContextT> = {
+export type BlockingBacklogRejectionOptions<ContextT, Handle> = {
   backlogSize: number;
   backlogTimeout: number | ((context: ContextT) => number);
-  queue: WaiterQueue<Waiter<ContextT>>;
+  queue: WaiterQueue<ContextT, Handle>;
 };
 
-export type WaiterQueue<WaiterT extends Waiter<any>> = {
-  enqueue: (waiter: Omit<WaiterT, "handle">) => WaiterT;
-  peekHead: () => WaiterT | undefined;
-  removeByHandle: (handle: WaiterHandle) => boolean;
+export type WaiterQueue<ContextT, Handle> = {
+  enqueue: (waiter: Waiter<ContextT>) => {
+    value: Waiter<ContextT>;
+    handle: Handle;
+  };
+  peekHead: () => { value: Waiter<ContextT>; handle: Handle } | undefined;
+  removeByHandle: (handle: Handle) => boolean;
   size: () => number;
 };
 
 export class BlockingBacklogRejection<
   ContextT,
+  Handle,
 > implements AllotmentUnavailableStrategy<ContextT> {
   private readonly backlogSize: number;
   private readonly getBacklogTimeout: (context: ContextT) => number;
-  private readonly queue: WaiterQueue<Waiter<ContextT>>;
+  private readonly queue: WaiterQueue<ContextT, Handle>;
   private drainInProgress = false;
   private releaseDuringDrain = false;
 
-  constructor(options: BlockingBacklogRejectionOptions<ContextT>) {
+  constructor(options: BlockingBacklogRejectionOptions<ContextT, Handle>) {
     const backlogSize = options.backlogSize;
     if (
       backlogSize !== Number.POSITIVE_INFINITY &&
@@ -94,10 +96,11 @@ export class BlockingBacklogRejection<
     this.drainInProgress = true;
     try {
       while (this.queue.size() > 0) {
-        const waiter = this.queue.peekHead();
-        if (!waiter) {
+        const queuedWaiter = this.queue.peekHead();
+        if (!queuedWaiter) {
           return;
         }
+        const waiter = queuedWaiter.value;
 
         this.releaseDuringDrain = false;
         const allotment = await waiter.retry(waiter.context);
@@ -111,7 +114,7 @@ export class BlockingBacklogRejection<
           return;
         }
 
-        if (!this.queue.removeByHandle(waiter.handle)) {
+        if (!this.queue.removeByHandle(queuedWaiter.handle)) {
           // Waiter expired while retry was in-flight. Release the acquired slot
           // so future retries can serve active queued waiters.
           await allotment.releaseAndIgnore();
@@ -148,18 +151,19 @@ export class BlockingBacklogRejection<
         resolve(allotment);
       };
 
-      const waiter = this.queue.enqueue({
+      const waiter: Waiter<ContextT> = {
         context,
         retry,
         resolve: (allotment) => settle(allotment),
-      });
+      };
+      const { handle } = this.queue.enqueue(waiter);
 
       const timer = setTimeout(() => settle(undefined), timeout);
       const onAbort = (): void => settle(undefined);
       const cleanup = (): void => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
-        this.queue.removeByHandle(waiter.handle);
+        this.queue.removeByHandle(handle);
       };
 
       signal?.addEventListener("abort", onAbort, { once: true });

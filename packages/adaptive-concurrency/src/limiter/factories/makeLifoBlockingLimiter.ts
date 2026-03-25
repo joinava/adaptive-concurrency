@@ -1,21 +1,23 @@
 import { Limiter, type LimiterOptions } from "../../Limiter.js";
+import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
 import {
-  LifoBlockingRejection,
-  type LifoBlockingRejectionOptions,
-} from "../allocation-unavailable-strategies/LifoBlockingRejection.js";
+  BlockingBacklogRejection,
+  type Waiter,
+} from "../allocation-unavailable-strategies/BlockingBacklogRejection.js";
 
 export function makeLifoBlockingLimiter<ContextT = void>(
   options: {
-    backlogSize?: LifoBlockingRejectionOptions<ContextT>["backlogSize"];
-    backlogTimeout?: LifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
+    backlogSize?: number;
+    backlogTimeout?: number | ((context: ContextT) => number);
     limiter?: Omit<LimiterOptions<ContextT>, "allotmentUnavailableStrategy">;
   } = {},
 ): Limiter<ContextT> {
   return new Limiter<ContextT>({
     ...options.limiter,
-    allotmentUnavailableStrategy: new LifoBlockingRejection<ContextT>({
-      backlogSize: options.backlogSize,
-      backlogTimeout: options.backlogTimeout,
+    allotmentUnavailableStrategy: new BlockingBacklogRejection({
+      backlogSize: options.backlogSize ?? 100,
+      backlogTimeout: options.backlogTimeout ?? 1_000,
+      queue: new LinkedWaiterQueue<Waiter<ContextT>>("front"),
     }),
   });
 }

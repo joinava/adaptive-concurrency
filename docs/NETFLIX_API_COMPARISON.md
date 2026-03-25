@@ -49,7 +49,7 @@ This moves customization from subclassing to composition.
 ### Blocking is an allotment-unavailable strategy, not a wrapper limiter
 
 - Java: blocking behavior is typically added by wrapping a limiter (`BlockingLimiter.wrap(...)`, `LifoBlockingLimiter...build()`).
-- TypeScript: blocking behavior is configured via `Limiter` option `allotmentUnavailableStrategy` (`FifoBlockingRejection`, `LifoBlockingRejection`).
+- TypeScript: blocking behavior is configured via `Limiter` option `allotmentUnavailableStrategy` (`BlockingBacklogRejection`,`DelayedThenBlockingRejection`, etc).
 
 Because JavaScript is single-threaded, "blocking" means promise-based waiting, not thread blocking.
 
@@ -129,8 +129,8 @@ No direct Java equivalent.
 | ---------------------------- | ---------------------------------------------------------------- |
 | `SimpleLimiter`              | `Limiter` with default `SemaphoreStrategy`                       |
 | `AbstractPartitionedLimiter` | `PartitionedStrategy` plugged into `Limiter.acquireStrategy`     |
-| `BlockingLimiter`            | `FifoBlockingRejection` plugged into `Limiter.allotmentUnavailableStrategy` |
-| `LifoBlockingLimiter`        | `LifoBlockingRejection` plugged into `Limiter.allotmentUnavailableStrategy` |
+| `BlockingLimiter`            | `BlockingBacklogRejection` + `new LinkedWaiterQueue("back")` in `Limiter.allotmentUnavailableStrategy` |
+| `LifoBlockingLimiter`        | `BlockingBacklogRejection` + `new LinkedWaiterQueue("front")` in `Limiter.allotmentUnavailableStrategy` |
 
 Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`, which currently returns `new GradientLimit()`, **not a `VegasLimit`**, which is what the Java code used.
 
@@ -140,7 +140,9 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 - `partitionResolver` is a single function; ordered fallback is left to the caller.
 - `PartitionedStrategy` accepts a second type parameter `PartitionName` (default `string`) so `partitions`, the resolver return type, and `getPartition`’s `name` can be narrowed (e.g. `"read" | "write"`).
 - Unknown partition behavior is retained.
-- `PartitionConfig` is only **`percent`** (no `rejectDelay`). Java-style **sleep-then-reject** uses **`DelayedRejectStrategy`**: implement `delayMsForContext` with the same partition resolution as `partitionResolver` and your own map/table of delay ms per partition name.
+- `PartitionConfig` has required **`percent`** plus optional **`burstMode`** (`unbounded` default, `capped`, or `none`) for below-saturation bursting policy.
+- Java-style **sleep-then-reject** is not a `PartitionConfig` field; use **`DelayedRejectStrategy`** with `delayMsForContext` keyed by your partition mapping.
+- Factory helpers (`makePartitionedLimiter`, `makePartitionedBlockingLimiter`, `makePartitionedLifoBlockingLimiter`) add a convenience `delayMs` field per partition (`PartitionConfig & { delayMs?: number }`) and wire it to `DelayedRejectStrategy`.
 - Java's `maxDelayedThreads` maps to **`DelayedRejectStrategy`**'s `maxConcurrentDelays` (default 100).
 - `PartitionedStrategy` requires `initialLimit`.
 - `PartitionedStrategy` itself throws if no partitions are provided; `HttpLimiterBuilder` falls back to non-partitioned `Limiter` when no partitions are configured.
@@ -149,24 +151,41 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 
 | Aspect                                     | Java                                           | TypeScript                                                                                                |
 | ------------------------------------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| FIFO blocking                              | `BlockingLimiter` wrapper                      | `FifoBlockingRejection`                                                                                   |
-| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `LifoBlockingRejection`                                                                                   |
+| FIFO blocking                              | `BlockingLimiter` wrapper                      | `BlockingBacklogRejection` + `new LinkedWaiterQueue("back")`                                            |
+| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `BlockingBacklogRejection` + `new LinkedWaiterQueue("front")`                                           |
 | Delay then reject (`partitionRejectDelay`) | `Thread.sleep` in `AbstractPartitionedLimiter` | `DelayedRejectStrategy` (`delayMsForContext`, `maxConcurrentDelays`); delays are not on `PartitionConfig` |
+| Delay then block                           | N/A                                            | `DelayedThenBlockingRejection` (compose delay + FIFO/LIFO blocking)                                      |
 | Blocking mechanism                         | thread wait/latch primitives                   | Promise queues                                                                                            |
 | Cancellation                               | interrupt-based                                | `AbortSignal` support                                                                                     |
 
 Additional details:
 
-- Both `FifoBlockingRejection` and `LifoBlockingRejection` use:
+- FIFO and LIFO blocking are both created from `BlockingBacklogRejection` and use:
   - `backlogSize` (maximum queued callers),
   - `backlogTimeout` (`number` or `(context) => number`),
   - max timeout cap of 1 hour.
 - Defaults differ to mirror Java intent:
   - FIFO: `backlogSize = Infinity`, `backlogTimeout = 1 hour`.
   - LIFO: `backlogSize = 100`, `backlogTimeout = 1 second`.
-- Both strategies are now thin wrappers around a shared `BlockingBacklogRejection` engine, with queue order (`enqueue` front/back) determining LIFO vs FIFO behavior.
+- Queue order (`enqueue` front/back) determines LIFO vs FIFO behavior.
 - Both strategies react to limit increases (`onLimitChanged`) by scheduling a backlog drain, so queued callers can be served without waiting for another release event.
 - `DelayedRejectStrategy`: awaits a delay then returns no allotment (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
+- `DelayedThenBlockingRejection`: runs delayed rejection first, then retries once, and if still unavailable delegates to configured blocking strategy.
+
+### Java-style builder wrappers -> TS factory helpers
+
+The TypeScript package also exports convenience factory functions that map common Java limiter wrappers/builders to composed `Limiter` options:
+
+| Java usage pattern                                      | TypeScript helper                           |
+| ------------------------------------------------------- | ------------------------------------------- |
+| `SimpleLimiter.newBuilder()...build()`                  | `makeSimpleLimiter(...)`                    |
+| `BlockingLimiter.wrap(...)` / blocking builder variants | `makeBlockingLimiter(...)`                  |
+| `LifoBlockingLimiter...build()`                         | `makeLifoBlockingLimiter(...)`              |
+| partitioned limiter builder                             | `makePartitionedLimiter(...)`               |
+| partitioned + blocking                                  | `makePartitionedBlockingLimiter(...)`       |
+| partitioned + lifo blocking                             | `makePartitionedLifoBlockingLimiter(...)`   |
+
+These are convenience APIs; the underlying model remains explicit composition via `new Limiter({...})`.
 
 ---
 
@@ -316,6 +335,8 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 - `QuotaNotAvailable` sentinel
 - `LimiterState` strategy input
 - `AcquireStrategy` / `AllotmentUnavailableStrategy` public extension points
+- `DelayedThenBlockingRejection`
+- limiter factory helpers (`makeSimpleLimiter`, `makeBlockingLimiter`, `makeLifoBlockingLimiter`, `makePartitionedLimiter`, `makePartitionedBlockingLimiter`, `makePartitionedLifoBlockingLimiter`)
 - `ListenerSet`
 - `createPercentileSampleWindow(...)`
 - `MostRecentValue`
@@ -334,8 +355,10 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 5. Replace builder/decorator constructions with `new Limiter({...})` plus strategies.
 6. Replace `BlockingLimiter`/`LifoBlockingLimiter` wrapping with `allotmentUnavailableStrategy` strategies.
 7. For partitioned limiting, pass a single `partitionResolver` in the `PartitionedStrategy` constructor options (compose multiple Java-style resolvers yourself, or use `HttpLimiterBuilder`, which does this at `build()`).
-8. Prefer `withLimiter(limiter)` for scoped acquire/complete flows where appropriate.
-9. If using TS blocking factories, use `backlogTimeout`/`backlogSize` options (not `timeout`).
+8. If you need stricter partition bursting than Java defaults, configure TS `PartitionConfig.burstMode` (`unbounded`/`capped`/`none`).
+9. If using TS partitioned factory helpers and Java-style reject delays, set per-partition `delayMs` (factory convenience) or wire your own `DelayedRejectStrategy`.
+10. Prefer `withLimiter(limiter)` for scoped acquire/complete flows where appropriate.
+11. If using TS blocking factories, use `backlogTimeout`/`backlogSize` options (not `timeout`).
 
 ---
 
@@ -344,9 +367,9 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 When upstream Java commits change behavior, likely TS touchpoints are:
 
 - listener lifecycle/acquire semantics -> `Limiter.ts`, `LimitAllotment.ts`
-- partition logic -> `limiter/PartitionedStrategy.ts`
-- blocking behavior -> `limiter/allocation-unavailable-strategies/BlockingBacklogRejection.ts`, `limiter/allocation-unavailable-strategies/FifoBlockingRejection.ts`, `limiter/allocation-unavailable-strategies/LifoBlockingRejection.ts`
-- Java partition reject delay -> `limiter/DelayedRejectStrategy.ts` (optional; compose with `delayMsForContext`)
+- partition logic -> `limiter/acquire-strategies/PartitionedStrategy.ts`
+- blocking behavior -> `limiter/allocation-unavailable-strategies/BlockingBacklogRejection.ts`, `limiter/allocation-unavailable-strategies/DelayedThenBlockingRejection.ts`
+- Java partition reject delay -> `limiter/allocation-unavailable-strategies/DelayedRejectStrategy.ts` (optional; compose with `delayMsForContext` or via factory `delayMs`)
 - algorithm math -> files under `limit/`
 - metrics tagging/counters -> `MetricRegistry.ts` (`MetricIds`) + limiter/strategy call sites
 - servlet integration deltas -> `packages/http` (or new integration package work)

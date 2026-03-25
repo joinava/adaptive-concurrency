@@ -1,24 +1,24 @@
+import { Limiter, type LimiterOptions } from "../../Limiter.js";
+import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
 import {
-  Limiter,
-  type LimiterOptions,
-} from "../../Limiter.js";
-import {
-  FifoBlockingRejection,
-  type FifoBlockingRejectionOptions,
-} from "../allocation-unavailable-strategies/FifoBlockingRejection.js";
+  BlockingBacklogRejection,
+  MAX_TIMEOUT,
+  type Waiter,
+} from "../allocation-unavailable-strategies/BlockingBacklogRejection.js";
 
 export function makeBlockingLimiter<ContextT = void>(
   options: {
     backlogSize?: number;
-    backlogTimeout?: FifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
+    backlogTimeout?: number | ((context: ContextT) => number);
     limiter?: Omit<LimiterOptions<ContextT>, "allotmentUnavailableStrategy">;
   } = {},
 ): Limiter<ContextT> {
   return new Limiter<ContextT>({
     ...options.limiter,
-    allotmentUnavailableStrategy: new FifoBlockingRejection<ContextT>({
-      backlogSize: options.backlogSize,
-      backlogTimeout: options.backlogTimeout,
+    allotmentUnavailableStrategy: new BlockingBacklogRejection({
+      backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
+      backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
+      queue: new LinkedWaiterQueue<Waiter<ContextT>>("back"),
     }),
   });
 }

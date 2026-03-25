@@ -8,7 +8,12 @@ import type {
   AllotmentUnavailableStrategy,
 } from "./Limiter.js";
 import { Limiter, withLimiter } from "./Limiter.js";
-import { FifoBlockingRejection } from "./limiter/allocation-unavailable-strategies/FifoBlockingRejection.js";
+import { LinkedWaiterQueue } from "./utils/LinkedWaiterQueue.js";
+import {
+  BlockingBacklogRejection,
+  MAX_TIMEOUT,
+  type BlockingBacklogRejectionOptions,
+} from "./limiter/allocation-unavailable-strategies/BlockingBacklogRejection.js";
 import {
   AdaptiveTimeoutError,
   QuotaNotAvailable,
@@ -17,6 +22,21 @@ import {
   isAdaptiveTimeoutError,
   success,
 } from "./RunResult.js";
+
+
+type BlockingOptions<ContextT> = Partial<
+  Pick<BlockingBacklogRejectionOptions<ContextT>, "backlogSize" | "backlogTimeout">
+>;
+
+function makeFifoBlockingRejection<ContextT>(
+  options: BlockingOptions<ContextT> = {},
+): BlockingBacklogRejection<ContextT> {
+  return new BlockingBacklogRejection<ContextT>({
+    backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
+    backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
+    queue: new LinkedWaiterQueue("back"),
+  });
+}
 
 describe("Limiter (default SemaphoreStrategy)", () => {
   it("should use limiter capacity until total limit is reached", async () => {
@@ -543,7 +563,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     it("inflight stays consistent through abort+release cycles", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(2),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });
@@ -575,7 +595,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     it("does not leak permits when abort races with blocking acquire across multiple slots", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(3),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
           backlogSize: 10,
         }),
@@ -619,7 +639,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     it("abort during blocking wait does not prevent subsequent non-aborted acquires", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
-        allotmentUnavailableStrategy: new FifoBlockingRejection({
+        allotmentUnavailableStrategy: makeFifoBlockingRejection({
           backlogTimeout: 5_000,
         }),
       });

@@ -1,17 +1,15 @@
-import {
-  Limiter,
-  type LimiterOptions,
-} from "../../Limiter.js";
-import { DelayedRejectStrategy } from "../allocation-unavailable-strategies/DelayedRejectStrategy.js";
-import { DelayedThenBlockingRejection } from "../allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
-import {
-  LifoBlockingRejection,
-  type LifoBlockingRejectionOptions,
-} from "../allocation-unavailable-strategies/LifoBlockingRejection.js";
+import { Limiter, type LimiterOptions } from "../../Limiter.js";
+import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
 import {
   PartitionedStrategy,
   type PartitionConfig,
 } from "../acquire-strategies/PartitionedStrategy.js";
+import {
+  BlockingBacklogRejection,
+  type Waiter,
+} from "../allocation-unavailable-strategies/BlockingBacklogRejection.js";
+import { DelayedRejectStrategy } from "../allocation-unavailable-strategies/DelayedRejectStrategy.js";
+import { DelayedThenBlockingRejection } from "../allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
 
 export function makePartitionedLifoBlockingLimiter<
   ContextT,
@@ -22,7 +20,7 @@ export function makePartitionedLifoBlockingLimiter<
   limiter?: Omit<LimiterOptions<ContextT>, "acquireStrategy">;
   maxConcurrentDelays?: number;
   backlogSize?: number;
-  backlogTimeout?: LifoBlockingRejectionOptions<ContextT>["backlogTimeout"];
+  backlogTimeout?: number | ((context: ContextT) => number);
 }): Limiter<ContextT> {
   const limit = options.limiter?.limit ?? Limiter.makeDefaultLimit();
   const delayByPartition = new Map(
@@ -51,9 +49,10 @@ export function makePartitionedLifoBlockingLimiter<
         },
         maxConcurrentDelays: options.maxConcurrentDelays,
       }),
-      blockingStrategy: new LifoBlockingRejection<ContextT>({
-        backlogSize: options.backlogSize,
-        backlogTimeout: options.backlogTimeout,
+      blockingStrategy: new BlockingBacklogRejection({
+        backlogSize: options.backlogSize ?? 100,
+        backlogTimeout: options.backlogTimeout ?? 1_000,
+        queue: new LinkedWaiterQueue<Waiter<ContextT>>("front"),
       }),
     }),
   });

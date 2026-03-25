@@ -2,7 +2,7 @@
 
 Automatically detect and adjust services' concurrency limits to achieve optimal throughput with optimal latency and availability. This keeps systems reliable and available without constant manual tuning of concurrency limits as system performance/topology evolves. It borrows concepts from TCP congestion control and other algorithms.
 
-This package is a TypeScript adaptation of [Netflix's concurrency-limits](https://github.com/Netflix/concurrency-limits) library. However, API has been [adjusted substantially](./docs/NETFLIX_API_COMPARISON.md) to better suit Typescript's type system, and Javascript's idioms and concurrency model.
+This package is a TypeScript adaptation of [Netflix's concurrency-limits](https://github.com/Netflix/concurrency-limits) library. However, API has been [adjusted substantially](./docs/NETFLIX_API_COMPARISON.md) to better suit TypeScript's type system, and JavaScript's idioms and concurrency model.
 
 ## Background
 
@@ -29,7 +29,7 @@ npm i adaptive-concurrency
 
 #### Creating a Limiter
 
-The core type is **`Limiter`**: it combines an adaptive **`limit`** (e.g. `VegasLimit`), an optional **`bypassResolver`**, an **`acquireStrategy`** (default: semaphore-style permits), and an optional **`allotmentUnavailableStrategy`** for blocking or queued behavior when no allotment is available.
+The core type is **`Limiter`**: it combines an adaptive **`limit`** (default: `GradientLimit`), an optional **`bypassResolver`**, an **`acquireStrategy`** (default: semaphore-style permits), and an optional **`allotmentUnavailableStrategy`** for blocking or queued behavior when no allotment is available.
 
 ```typescript
 import { Limiter, VegasLimit } from "adaptive-concurrency";
@@ -180,9 +180,11 @@ app.use(concurrencyLimitMiddleware(limiter));
 
 Delay-based algorithm inspired by TCP Vegas. Estimates queue size as `limit × (1 − RTTnoLoad / RTTactual)` and adjusts the limit based on whether the queue is above or below configurable thresholds.
 
-### Gradient2Limit
+### GradientLimit
 
 Adjusts the limit based on the gradient between a long-term exponentially smoothed average RTT and the current short-term RTT. Uses average instead of minimum RTT to handle bursty RPC workloads.
+
+This matches Netflix's **Gradient2Limit** algorithm, not the deprecated v1 algorithm called GradientLimit in their package.
 
 ### AIMDLimit
 
@@ -192,12 +194,61 @@ Simple additive-increase/multiplicative-decrease algorithm. Increases the limit 
 
 Decorator that buffers samples into time-based windows before forwarding aggregated results to a delegate algorithm, reducing noise from individual samples.
 
+### FixedLimit / SettableLimit / TracingLimitDecorator
+
+- **`FixedLimit`** — constant, non-adaptive limit.
+- **`SettableLimit`** — mutable limit, useful for tests/manual control.
+- **`TracingLimitDecorator`** — wraps a limit and emits debug logs on updates.
+
 ## Limiter building blocks
 
 - **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**.
-- **`PartitionedStrategy`** — Percentage-based partitions (combine with `Limiter` via `acquireStrategy`). Per-partition reject delay is not configured here; use **`DelayedRejectStrategy`** and your own delay map keyed by partition.
-- **`FifoBlockingRejection` / `LifoBlockingRejection`** — When at capacity, wait on a promise (FIFO fair vs LIFO for tail latency). Both support `backlogSize` and `backlogTimeout` (`number` or `(context) => number`), and both proactively re-attempt draining on limit increases.
+- **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. Combine with `Limiter` via `acquireStrategy`.
+- **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and queue ordering with `new LinkedWaiterQueue("back")` (FIFO/fair) or `new LinkedWaiterQueue("front")` (LIFO/tail-latency focused). It proactively re-attempts draining on limit increases.
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
+- **`DelayedThenBlockingRejection`** — Two-stage behavior: uncoditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
+
+## Factory helpers
+
+The package also exports factory helpers for common configurations:
+
+- `makeSimpleLimiter`
+- `makeBlockingLimiter`
+- `makeLifoBlockingLimiter`
+- `makePartitionedLimiter`
+- `makePartitionedBlockingLimiter`
+- `makePartitionedLifoBlockingLimiter`
+
+For direct strategy composition (without a factory), instantiate the generic strategy explicitly:
+
+```typescript
+import {
+  BlockingBacklogRejection,
+  LinkedWaiterQueue,
+  Limiter,
+} from "adaptive-concurrency";
+
+const fifoLimiter = new Limiter({
+  allotmentUnavailableStrategy: new BlockingBacklogRejection({
+    backlogSize: Number.POSITIVE_INFINITY,
+    backlogTimeout: 60 * 60 * 1000,
+    queue: new LinkedWaiterQueue("back"), // FIFO
+  }),
+});
+
+const lifoLimiter = new Limiter({
+  allotmentUnavailableStrategy: new BlockingBacklogRejection({
+    backlogSize: 100,
+    backlogTimeout: 1_000,
+    queue: new LinkedWaiterQueue("front"), // LIFO
+  }),
+});
+```
+
+The partitioned factory helpers accept `partitions` as `PartitionConfig & { delayMs?: number }`, so they support both:
+
+- core partition behavior (`percent`, optional `burstMode`) and
+- Java-style per-partition delay via `delayMs`, wired internally to `DelayedRejectStrategy`.
 
 ## Development
 

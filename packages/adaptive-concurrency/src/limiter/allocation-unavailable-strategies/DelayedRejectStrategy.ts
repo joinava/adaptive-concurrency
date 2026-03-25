@@ -22,7 +22,7 @@ export interface DelayedRejectStrategyOptions<ContextT> {
 /**
  * When the acquire strategy rejects, waits up to `delayMsForContext(context)`,
  * then still returns no allotment. This adds a form of backpressure. Does not
- * call `retry` — unlike {@link FifoBlockingRejection}, this is "delay then
+ * call `retry` — unlike {@link BlockingBacklogRejection}, this is "delay then
  * reject," not "wait for capacity." Compose with `PartitionedStrategy` via
  * `Limiter.rejectionStrategy`; partition delays are not fields on `PartitionConfig`.
  */

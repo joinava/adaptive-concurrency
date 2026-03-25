@@ -80,12 +80,13 @@ export { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrateg
 
 // Rejection strategies
 export {
+  BlockingBacklogRejection,
+  MAX_TIMEOUT,
+  type BlockingBacklogRejectionOptions,
+  type WaiterQueue,
+} from "./limiter/allocation-unavailable-strategies/BlockingBacklogRejection.js";
+export {
   DelayedRejectStrategy,
   type DelayedRejectStrategyOptions,
 } from "./limiter/allocation-unavailable-strategies/DelayedRejectStrategy.js";
 export { DelayedThenBlockingRejection } from "./limiter/allocation-unavailable-strategies/DelayedThenBlockingRejection.js";
-export { FifoBlockingRejection } from "./limiter/allocation-unavailable-strategies/FifoBlockingRejection.js";
-export {
-  LifoBlockingRejection,
-  type LifoBlockingRejectionOptions,
-} from "./limiter/allocation-unavailable-strategies/LifoBlockingRejection.js";
