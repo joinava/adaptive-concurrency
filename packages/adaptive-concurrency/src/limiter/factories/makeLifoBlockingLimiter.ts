@@ -17,7 +17,8 @@ export function makeLifoBlockingLimiter<ContextT = void>(
     allotmentUnavailableStrategy: new BlockingBacklogRejection({
       backlogSize: options.backlogSize ?? 100,
       backlogTimeout: options.backlogTimeout ?? 1_000,
-      queue: new LinkedWaiterQueue<Waiter<ContextT>>("front"),
+      enqueueDirection: "front",
+      queue: new LinkedWaiterQueue<Waiter<ContextT>>(),
     }),
   });
 }

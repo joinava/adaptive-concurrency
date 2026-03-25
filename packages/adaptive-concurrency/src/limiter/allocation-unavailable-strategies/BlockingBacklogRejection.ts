@@ -3,6 +3,10 @@ import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
+import type {
+  EnqueueDirection,
+  EnqueueOptions,
+} from "../../utils/LinkedWaiterQueue.js";
 
 export type Waiter<ContextT> = {
   context: ContextT;
@@ -16,13 +20,16 @@ export type BlockingBacklogRejectionOptions<ContextT, Handle> = {
   backlogSize: number;
   backlogTimeout: number | ((context: ContextT) => number);
   queue: WaiterQueue<ContextT, Handle>;
+  enqueueDirection:
+    | EnqueueDirection
+    | ((context: ContextT) => EnqueueDirection);
 };
 
 export type WaiterQueue<ContextT, Handle> = {
-  enqueue: (waiter: Waiter<ContextT>) => {
-    value: Waiter<ContextT>;
-    handle: Handle;
-  };
+  enqueue: (
+    waiter: Waiter<ContextT>,
+    options: EnqueueOptions,
+  ) => { value: Waiter<ContextT>; handle: Handle };
   peekHead: () => { value: Waiter<ContextT>; handle: Handle } | undefined;
   removeByHandle: (handle: Handle) => boolean;
   size: () => number;
@@ -34,37 +41,38 @@ export class BlockingBacklogRejection<
 > implements AllotmentUnavailableStrategy<ContextT> {
   private readonly backlogSize: number;
   private readonly getBacklogTimeout: (context: ContextT) => number;
+  private readonly getEnqueueOptions: (context: ContextT) => EnqueueOptions;
   private readonly queue: WaiterQueue<ContextT, Handle>;
   private drainInProgress = false;
   private releaseDuringDrain = false;
 
   constructor(options: BlockingBacklogRejectionOptions<ContextT, Handle>) {
     const backlogSize = options.backlogSize;
-    if (
-      backlogSize !== Number.POSITIVE_INFINITY &&
-      (!Number.isFinite(backlogSize) || backlogSize < 0)
-    ) {
-      throw new RangeError(
-        "BlockingBacklogRejection: backlogSize must be a finite number greater than or equal to 0, or Infinity",
-      );
+    if (Number.isNaN(backlogSize) || backlogSize < 0) {
+      throw new RangeError("backlogSize must be greater than or equal to 0");
     }
 
     this.backlogSize = backlogSize;
     this.queue = options.queue;
-
     const backlogTimeout = options.backlogTimeout;
+    const enqueueDirection = options.enqueueDirection;
 
-    if (typeof backlogTimeout === "number") {
-      this.assertTimeoutWithinBounds(backlogTimeout);
-      this.getBacklogTimeout = () => backlogTimeout;
-      return;
-    }
+    this.getBacklogTimeout = (() => {
+      if (typeof backlogTimeout === "number") {
+        this.assertTimeoutWithinBounds(backlogTimeout);
+        return () => backlogTimeout;
+      }
+      return (context) => {
+        const contextTimeout = backlogTimeout(context);
+        this.assertTimeoutWithinBounds(contextTimeout);
+        return contextTimeout;
+      };
+    })();
 
-    this.getBacklogTimeout = (context) => {
-      const contextTimeout = backlogTimeout(context);
-      this.assertTimeoutWithinBounds(contextTimeout);
-      return contextTimeout;
-    };
+    this.getEnqueueOptions =
+      typeof enqueueDirection === "function"
+        ? (context) => ({ direction: enqueueDirection(context) })
+        : () => ({ direction: enqueueDirection });
   }
 
   onAllotmentUnavailable(
@@ -156,7 +164,9 @@ export class BlockingBacklogRejection<
         retry,
         resolve: (allotment) => settle(allotment),
       };
-      const { handle } = this.queue.enqueue(waiter);
+
+      const enqueueOptions = this.getEnqueueOptions(context);
+      const { handle } = this.queue.enqueue(waiter, enqueueOptions);
 
       const timer = setTimeout(() => settle(undefined), timeout);
       const onAbort = (): void => settle(undefined);

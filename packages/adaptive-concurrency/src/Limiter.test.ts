@@ -25,16 +25,20 @@ import {
 
 
 type BlockingOptions<ContextT> = Partial<
-  Pick<BlockingBacklogRejectionOptions<ContextT>, "backlogSize" | "backlogTimeout">
+  Pick<
+    BlockingBacklogRejectionOptions<ContextT, object>,
+    "backlogSize" | "backlogTimeout"
+  >
 >;
 
 function makeFifoBlockingRejection<ContextT>(
   options: BlockingOptions<ContextT> = {},
-): BlockingBacklogRejection<ContextT> {
-  return new BlockingBacklogRejection<ContextT>({
+): BlockingBacklogRejection<ContextT, object> {
+  return new BlockingBacklogRejection<ContextT, object>({
     backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
     backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
-    queue: new LinkedWaiterQueue("back"),
+    enqueueDirection: "back",
+    queue: new LinkedWaiterQueue(),
   });
 }
 

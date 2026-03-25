@@ -18,7 +18,8 @@ export function makeBlockingLimiter<ContextT = void>(
     allotmentUnavailableStrategy: new BlockingBacklogRejection({
       backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
       backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
-      queue: new LinkedWaiterQueue<Waiter<ContextT>>("back"),
+      enqueueDirection: "back",
+      queue: new LinkedWaiterQueue<Waiter<ContextT>>(),
     }),
   });
 }

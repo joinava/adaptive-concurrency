@@ -14,28 +14,30 @@ import {
 
 type BlockingOptions<ContextT> = Partial<
   Pick<
-    BlockingBacklogRejectionOptions<ContextT>,
+    BlockingBacklogRejectionOptions<ContextT, object>,
     "backlogSize" | "backlogTimeout"
   >
 >;
 
 function makeFifoBlockingRejection<ContextT>(
   options: BlockingOptions<ContextT> = {},
-): BlockingBacklogRejection<ContextT> {
-  return new BlockingBacklogRejection<ContextT>({
+): BlockingBacklogRejection<ContextT, object> {
+  return new BlockingBacklogRejection<ContextT, object>({
     backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
     backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
-    queue: new LinkedWaiterQueue("back"),
+    enqueueDirection: "back",
+    queue: new LinkedWaiterQueue(),
   });
 }
 
 function makeLifoBlockingRejection<ContextT>(
   options: BlockingOptions<ContextT> = {},
-): BlockingBacklogRejection<ContextT> {
-  return new BlockingBacklogRejection<ContextT>({
+): BlockingBacklogRejection<ContextT, object> {
+  return new BlockingBacklogRejection<ContextT, object>({
     backlogSize: options.backlogSize ?? 100,
     backlogTimeout: options.backlogTimeout ?? 1_000,
-    queue: new LinkedWaiterQueue("front"),
+    enqueueDirection: "front",
+    queue: new LinkedWaiterQueue(),
   });
 }
 

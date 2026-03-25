@@ -18,10 +18,10 @@ function assertHeadMatchesEnqueued(
 
 describe("LinkedWaiterQueue", () => {
   it("uses FIFO ordering when enqueue direction is back", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("back");
+    const queue = new LinkedWaiterQueue<TestWaiter>();
 
-    const first = queue.enqueue({ id: "first" });
-    const second = queue.enqueue({ id: "second" });
+    const first = queue.enqueue({ id: "first" }, { direction: "back" });
+    const second = queue.enqueue({ id: "second" }, { direction: "back" });
 
     assertHeadMatchesEnqueued(queue, first);
     assert.equal(queue.size(), 2);
@@ -32,10 +32,10 @@ describe("LinkedWaiterQueue", () => {
   });
 
   it("uses LIFO ordering when enqueue direction is front", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("front");
+    const queue = new LinkedWaiterQueue<TestWaiter>();
 
-    const first = queue.enqueue({ id: "first" });
-    const second = queue.enqueue({ id: "second" });
+    const first = queue.enqueue({ id: "first" }, { direction: "front" });
+    const second = queue.enqueue({ id: "second" }, { direction: "front" });
 
     assertHeadMatchesEnqueued(queue, second);
     assert.equal(queue.size(), 2);
@@ -46,10 +46,13 @@ describe("LinkedWaiterQueue", () => {
   });
 
   it("allows a single enqueue to override back direction with front", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("back");
+    const queue = new LinkedWaiterQueue<TestWaiter>();
 
-    const first = queue.enqueue({ id: "first" });
-    const overridden = queue.enqueue({ id: "override-front" }, "front");
+    const first = queue.enqueue({ id: "first" }, { direction: "back" });
+    const overridden = queue.enqueue(
+      { id: "override-front" },
+      { direction: "front" },
+    );
 
     assertHeadMatchesEnqueued(queue, overridden);
     assert.equal(queue.size(), 2);
@@ -59,10 +62,13 @@ describe("LinkedWaiterQueue", () => {
   });
 
   it("allows a single enqueue to override front direction with back", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("front");
+    const queue = new LinkedWaiterQueue<TestWaiter>();
 
-    const first = queue.enqueue({ id: "first" });
-    const overridden = queue.enqueue({ id: "override-back" }, "back");
+    const first = queue.enqueue({ id: "first" }, { direction: "front" });
+    const overridden = queue.enqueue(
+      { id: "override-back" },
+      { direction: "back" },
+    );
 
     assertHeadMatchesEnqueued(queue, first);
     assert.equal(queue.size(), 2);
@@ -72,11 +78,11 @@ describe("LinkedWaiterQueue", () => {
   });
 
   it("supports O(1)-style removal by handle from middle", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("back");
+    const queue = new LinkedWaiterQueue<TestWaiter>();
 
-    const first = queue.enqueue({ id: "first" });
-    const middle = queue.enqueue({ id: "middle" });
-    const last = queue.enqueue({ id: "last" });
+    const first = queue.enqueue({ id: "first" }, { direction: "back" });
+    const middle = queue.enqueue({ id: "middle" }, { direction: "back" });
+    const last = queue.enqueue({ id: "last" }, { direction: "back" });
 
     assert.equal(queue.removeByHandle(middle.handle), true);
     assert.equal(queue.size(), 2);
@@ -88,17 +94,17 @@ describe("LinkedWaiterQueue", () => {
   });
 
   it("returns false when removing an unknown handle", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("back");
-    queue.enqueue({ id: "first" });
+    const queue = new LinkedWaiterQueue<TestWaiter>();
+    queue.enqueue({ id: "first" }, { direction: "back" });
 
     assert.equal(queue.removeByHandle({}), false);
     assert.equal(queue.size(), 1);
   });
 
   it("returns object handles from enqueue and peekHead", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("back");
+    const queue = new LinkedWaiterQueue<TestWaiter>();
 
-    const enqueued = queue.enqueue({ id: "first" });
+    const enqueued = queue.enqueue({ id: "first" }, { direction: "back" });
     const head = queue.peekHead();
 
     assert.equal(typeof enqueued, "object");
@@ -109,8 +115,8 @@ describe("LinkedWaiterQueue", () => {
   });
 
   it("returns false when removing the same waiter twice", () => {
-    const queue = new LinkedWaiterQueue<TestWaiter>("back");
-    const waiter = queue.enqueue({ id: "first" });
+    const queue = new LinkedWaiterQueue<TestWaiter>();
+    const waiter = queue.enqueue({ id: "first" }, { direction: "back" });
 
     assert.equal(queue.removeByHandle(waiter.handle), true);
     assert.equal(queue.removeByHandle(waiter.handle), false);

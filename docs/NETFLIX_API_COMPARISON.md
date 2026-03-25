@@ -129,8 +129,8 @@ No direct Java equivalent.
 | ---------------------------- | ---------------------------------------------------------------- |
 | `SimpleLimiter`              | `Limiter` with default `SemaphoreStrategy`                       |
 | `AbstractPartitionedLimiter` | `PartitionedStrategy` plugged into `Limiter.acquireStrategy`     |
-| `BlockingLimiter`            | `BlockingBacklogRejection` + `new LinkedWaiterQueue("back")` in `Limiter.allotmentUnavailableStrategy` |
-| `LifoBlockingLimiter`        | `BlockingBacklogRejection` + `new LinkedWaiterQueue("front")` in `Limiter.allotmentUnavailableStrategy` |
+| `BlockingLimiter`            | `BlockingBacklogRejection` with `enqueueDirection: "back"` + `new LinkedWaiterQueue()` in `Limiter.allotmentUnavailableStrategy` |
+| `LifoBlockingLimiter`        | `BlockingBacklogRejection` with `enqueueDirection: "front"` + `new LinkedWaiterQueue()` in `Limiter.allotmentUnavailableStrategy` |
 
 Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`, which currently returns `new GradientLimit()`, **not a `VegasLimit`**, which is what the Java code used.
 
@@ -151,8 +151,8 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 
 | Aspect                                     | Java                                           | TypeScript                                                                                                |
 | ------------------------------------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| FIFO blocking                              | `BlockingLimiter` wrapper                      | `BlockingBacklogRejection` + `new LinkedWaiterQueue("back")`                                            |
-| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `BlockingBacklogRejection` + `new LinkedWaiterQueue("front")`                                           |
+| FIFO blocking                              | `BlockingLimiter` wrapper                      | `BlockingBacklogRejection` + `enqueueDirection: "back"` + `new LinkedWaiterQueue()`                     |
+| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `BlockingBacklogRejection` + `enqueueDirection: "front"` + `new LinkedWaiterQueue()`                    |
 | Delay then reject (`partitionRejectDelay`) | `Thread.sleep` in `AbstractPartitionedLimiter` | `DelayedRejectStrategy` (`delayMsForContext`, `maxConcurrentDelays`); delays are not on `PartitionConfig` |
 | Delay then block                           | N/A                                            | `DelayedThenBlockingRejection` (compose delay + FIFO/LIFO blocking)                                      |
 | Blocking mechanism                         | thread wait/latch primitives                   | Promise queues                                                                                            |
@@ -167,7 +167,7 @@ Additional details:
 - Defaults differ to mirror Java intent:
   - FIFO: `backlogSize = Infinity`, `backlogTimeout = 1 hour`.
   - LIFO: `backlogSize = 100`, `backlogTimeout = 1 second`.
-- Queue order (`enqueue` front/back) determines LIFO vs FIFO behavior.
+- `enqueueDirection` determines LIFO (`"front"`) vs FIFO (`"back"`), and can also be provided as `(context) => "front" | "back"` for context-dependent queueing behavior.
 - Both strategies react to limit increases (`onLimitChanged`) by scheduling a backlog drain, so queued callers can be served without waiting for another release event.
 - `DelayedRejectStrategy`: awaits a delay then returns no allotment (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
 - `DelayedThenBlockingRejection`: runs delayed rejection first, then retries once, and if still unavailable delegates to configured blocking strategy.

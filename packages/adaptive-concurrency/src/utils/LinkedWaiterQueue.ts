@@ -1,6 +1,9 @@
 class ItemHandle {}
 
 export type EnqueueDirection = "front" | "back";
+export type EnqueueOptions = {
+  direction: EnqueueDirection;
+};
 
 type LinkedNode<T extends object> = {
   handle: ItemHandle;
@@ -13,16 +16,11 @@ export class LinkedWaiterQueue<T extends object> {
   private head: LinkedNode<T> | undefined;
   private tail: LinkedNode<T> | undefined;
   private readonly nodes = new Map<ItemHandle, LinkedNode<T>>();
-  private readonly enqueueDirection: EnqueueDirection;
   private length = 0;
-
-  constructor(enqueueDirection: EnqueueDirection) {
-    this.enqueueDirection = enqueueDirection;
-  }
 
   enqueue(
     value: T,
-    enqueueDirection?: EnqueueDirection,
+    options: EnqueueOptions,
   ): { value: T; handle: ItemHandle } {
     const handle = new ItemHandle();
 
@@ -33,9 +31,8 @@ export class LinkedWaiterQueue<T extends object> {
       next: undefined,
     };
 
-    const direction = enqueueDirection ?? this.enqueueDirection;
     this.nodes.set(handle, node);
-    if (direction === "front") {
+    if (options.direction === "front") {
       this.pushFront(node);
     } else {
       this.pushBack(node);
