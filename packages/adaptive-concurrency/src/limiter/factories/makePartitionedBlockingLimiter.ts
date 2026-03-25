@@ -52,7 +52,7 @@ export function makePartitionedBlockingLimiter<
       blockingStrategy: new BlockingBacklogRejection({
         backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
         backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
-        enqueueDirection: "back",
+        enqueueOptions: { direction: "back" },
         queue: new LinkedWaiterQueue<Waiter<ContextT>>(),
       }),
     }),

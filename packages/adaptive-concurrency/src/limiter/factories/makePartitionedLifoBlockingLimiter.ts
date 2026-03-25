@@ -52,7 +52,7 @@ export function makePartitionedLifoBlockingLimiter<
       blockingStrategy: new BlockingBacklogRejection({
         backlogSize: options.backlogSize ?? 100,
         backlogTimeout: options.backlogTimeout ?? 1_000,
-        enqueueDirection: "front",
+        enqueueOptions: { direction: "front" },
         queue: new LinkedWaiterQueue<Waiter<ContextT>>(),
       }),
     }),

@@ -25,7 +25,7 @@ function makeFifoBlockingRejection<ContextT>(
   return new BlockingBacklogRejection<ContextT, object>({
     backlogSize: options.backlogSize ?? Number.POSITIVE_INFINITY,
     backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
-    enqueueDirection: "back",
+    enqueueOptions: { direction: "back" },
     queue: new LinkedWaiterQueue(),
   });
 }
@@ -36,7 +36,7 @@ function makeLifoBlockingRejection<ContextT>(
   return new BlockingBacklogRejection<ContextT, object>({
     backlogSize: options.backlogSize ?? 100,
     backlogTimeout: options.backlogTimeout ?? 1_000,
-    enqueueDirection: "front",
+    enqueueOptions: { direction: "front" },
     queue: new LinkedWaiterQueue(),
   });
 }

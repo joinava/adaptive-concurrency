@@ -204,7 +204,7 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 
 - **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**.
 - **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. Combine with `Limiter` via `acquireStrategy`.
-- **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueDirection` (`"back"` for FIFO/fair or `"front"` for LIFO/tail-latency focused). It proactively re-attempts draining on limit increases.
+- **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function.
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
 - **`DelayedThenBlockingRejection`** — Two-stage behavior: uncoditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
 
@@ -232,7 +232,7 @@ const fifoLimiter = new Limiter({
   allotmentUnavailableStrategy: new BlockingBacklogRejection({
     backlogSize: Number.POSITIVE_INFINITY,
     backlogTimeout: 60 * 60 * 1000,
-    enqueueDirection: "back", // FIFO
+    enqueueOptions: { direction: "back" }, // FIFO
     queue: new LinkedWaiterQueue(),
   }),
 });
@@ -241,7 +241,7 @@ const lifoLimiter = new Limiter({
   allotmentUnavailableStrategy: new BlockingBacklogRejection({
     backlogSize: 100,
     backlogTimeout: 1_000,
-    enqueueDirection: "front", // LIFO
+    enqueueOptions: { direction: "front" }, // LIFO
     queue: new LinkedWaiterQueue(),
   }),
 });

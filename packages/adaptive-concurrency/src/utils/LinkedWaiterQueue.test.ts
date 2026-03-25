@@ -123,4 +123,55 @@ describe("LinkedWaiterQueue", () => {
     assert.equal(queue.size(), 0);
     assert.equal(queue.peekHead(), undefined);
   });
+
+  it("serves higher-priority waiters first", () => {
+    const queue = new LinkedWaiterQueue<TestWaiter>();
+    const low = queue.enqueue(
+      { id: "low" },
+      { direction: "back", priority: 1 },
+    );
+    const high = queue.enqueue(
+      { id: "high" },
+      { direction: "back", priority: 10 },
+    );
+
+    assertHeadMatchesEnqueued(queue, high);
+    assert.equal(queue.removeByHandle(high.handle), true);
+    assertHeadMatchesEnqueued(queue, low);
+  });
+
+  it("uses direction for tie-breakers at equal priority", () => {
+    const queue = new LinkedWaiterQueue<TestWaiter>();
+    const older = queue.enqueue(
+      { id: "older" },
+      { direction: "back", priority: 5 },
+    );
+    const newerFront = queue.enqueue(
+      { id: "newer-front" },
+      { direction: "front", priority: 5 },
+    );
+    const newestBack = queue.enqueue(
+      { id: "newest-back" },
+      { direction: "back", priority: 5 },
+    );
+
+    assertHeadMatchesEnqueued(queue, newerFront);
+    assert.equal(queue.removeByHandle(newerFront.handle), true);
+    assertHeadMatchesEnqueued(queue, older);
+    assert.equal(queue.removeByHandle(older.handle), true);
+    assertHeadMatchesEnqueued(queue, newestBack);
+  });
+
+  it("throws for non-finite priorities", () => {
+    const queue = new LinkedWaiterQueue<TestWaiter>();
+    assert.throws(
+      () =>
+        queue.enqueue({ id: "bad" }, { direction: "back", priority: Infinity }),
+      /priority must be a finite number/,
+    );
+    assert.throws(
+      () => queue.enqueue({ id: "bad" }, { direction: "front", priority: NaN }),
+      /priority must be a finite number/,
+    );
+  });
 });

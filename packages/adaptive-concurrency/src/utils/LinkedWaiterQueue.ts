@@ -3,19 +3,29 @@ class ItemHandle {}
 export type EnqueueDirection = "front" | "back";
 export type EnqueueOptions = {
   direction: EnqueueDirection;
+  priority?: number | undefined;
 };
 
 type LinkedNode<T extends object> = {
   handle: ItemHandle;
   value: T;
+  priority: number;
   prev: LinkedNode<T> | undefined;
   next: LinkedNode<T> | undefined;
+  bucket: PriorityBucket<T>;
+};
+
+type PriorityBucket<T extends object> = {
+  priority: number;
+  head: LinkedNode<T> | undefined;
+  tail: LinkedNode<T> | undefined;
+  size: number;
 };
 
 export class LinkedWaiterQueue<T extends object> {
-  private head: LinkedNode<T> | undefined;
-  private tail: LinkedNode<T> | undefined;
+  private readonly buckets = new Map<number, PriorityBucket<T>>();
   private readonly nodes = new Map<ItemHandle, LinkedNode<T>>();
+  private maxPriority: number | undefined;
   private length = 0;
 
   enqueue(
@@ -23,31 +33,41 @@ export class LinkedWaiterQueue<T extends object> {
     options: EnqueueOptions,
   ): { value: T; handle: ItemHandle } {
     const handle = new ItemHandle();
+    const priority = options.priority ?? 0;
+    if (!Number.isFinite(priority)) {
+      throw new RangeError("priority must be a finite number");
+    }
 
+    const bucket = this.getOrCreateBucket(priority);
     const node: LinkedNode<T> = {
       handle,
       value: value,
+      priority,
       prev: undefined,
       next: undefined,
+      bucket,
     };
 
     this.nodes.set(handle, node);
-    if (options.direction === "front") {
-      this.pushFront(node);
-    } else {
-      this.pushBack(node);
+    this.insertInBucket(node, options.direction);
+    if (this.maxPriority === undefined || priority > this.maxPriority) {
+      this.maxPriority = priority;
     }
     this.length += 1;
     return { value, handle };
   }
 
   peekHead(): { value: T; handle: ItemHandle } | undefined {
-    if (!this.head) {
+    if (this.maxPriority === undefined) {
+      return undefined;
+    }
+    const bucket = this.buckets.get(this.maxPriority);
+    if (!bucket || !bucket.head) {
       return undefined;
     }
     return {
-      value: this.head.value,
-      handle: this.head.handle,
+      value: bucket.head.value,
+      handle: bucket.head.handle,
     };
   }
 
@@ -56,17 +76,7 @@ export class LinkedWaiterQueue<T extends object> {
     if (!node) return false;
     this.nodes.delete(handle);
 
-    if (node.prev) {
-      node.prev.next = node.next;
-    } else {
-      this.head = node.next;
-    }
-
-    if (node.next) {
-      node.next.prev = node.prev;
-    } else {
-      this.tail = node.prev;
-    }
+    this.unlinkFromBucket(node);
 
     node.prev = undefined;
     node.next = undefined;
@@ -78,27 +88,74 @@ export class LinkedWaiterQueue<T extends object> {
     return this.length;
   }
 
-  private pushFront(node: LinkedNode<T>): void {
-    if (!this.head) {
-      this.head = node;
-      this.tail = node;
-      return;
+  private getOrCreateBucket(priority: number): PriorityBucket<T> {
+    const existing = this.buckets.get(priority);
+    if (existing) {
+      return existing;
     }
-
-    node.next = this.head;
-    this.head.prev = node;
-    this.head = node;
+    const created: PriorityBucket<T> = {
+      priority,
+      head: undefined,
+      tail: undefined,
+      size: 0,
+    };
+    this.buckets.set(priority, created);
+    return created;
   }
 
-  private pushBack(node: LinkedNode<T>): void {
-    if (!this.tail) {
-      this.head = node;
-      this.tail = node;
+  private insertInBucket(node: LinkedNode<T>, direction: EnqueueDirection): void {
+    const bucket = node.bucket;
+    if (direction === "front") {
+      if (!bucket.head) {
+        bucket.head = node;
+        bucket.tail = node;
+      } else {
+        node.next = bucket.head;
+        bucket.head.prev = node;
+        bucket.head = node;
+      }
+    } else {
+      if (!bucket.tail) {
+        bucket.head = node;
+        bucket.tail = node;
+      } else {
+        node.prev = bucket.tail;
+        bucket.tail.next = node;
+        bucket.tail = node;
+      }
+    }
+    bucket.size += 1;
+  }
+
+  private unlinkFromBucket(node: LinkedNode<T>): void {
+    const bucket = node.bucket;
+    if (node.prev) {
+      node.prev.next = node.next;
+    } else {
+      bucket.head = node.next;
+    }
+    if (node.next) {
+      node.next.prev = node.prev;
+    } else {
+      bucket.tail = node.prev;
+    }
+    bucket.size -= 1;
+
+    if (bucket.size > 0) {
       return;
     }
 
-    node.prev = this.tail;
-    this.tail.next = node;
-    this.tail = node;
+    this.buckets.delete(bucket.priority);
+    if (this.maxPriority !== bucket.priority) {
+      return;
+    }
+
+    let newMax: number | undefined;
+    for (const priority of this.buckets.keys()) {
+      if (newMax === undefined || priority > newMax) {
+        newMax = priority;
+      }
+    }
+    this.maxPriority = newMax;
   }
 }

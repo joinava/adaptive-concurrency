@@ -3,10 +3,7 @@ import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
 } from "../../Limiter.js";
-import type {
-  EnqueueDirection,
-  EnqueueOptions,
-} from "../../utils/LinkedWaiterQueue.js";
+import type { EnqueueOptions } from "../../utils/LinkedWaiterQueue.js";
 
 export type Waiter<ContextT> = {
   context: ContextT;
@@ -16,19 +13,21 @@ export type Waiter<ContextT> = {
 
 export const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
 
-export type BlockingBacklogRejectionOptions<ContextT, Handle> = {
+export type BlockingBacklogRejectionOptions<
+  ContextT,
+  Handle,
+  EnqueueOptionsT = EnqueueOptions,
+> = {
   backlogSize: number;
   backlogTimeout: number | ((context: ContextT) => number);
-  queue: WaiterQueue<ContextT, Handle>;
-  enqueueDirection:
-    | EnqueueDirection
-    | ((context: ContextT) => EnqueueDirection);
+  queue: WaiterQueue<ContextT, Handle, EnqueueOptionsT>;
+  enqueueOptions: EnqueueOptionsT | ((context: ContextT) => EnqueueOptionsT);
 };
 
-export type WaiterQueue<ContextT, Handle> = {
+export type WaiterQueue<ContextT, Handle, EnqueueOptionsT = EnqueueOptions> = {
   enqueue: (
     waiter: Waiter<ContextT>,
-    options: EnqueueOptions,
+    options: EnqueueOptionsT,
   ) => { value: Waiter<ContextT>; handle: Handle };
   peekHead: () => { value: Waiter<ContextT>; handle: Handle } | undefined;
   removeByHandle: (handle: Handle) => boolean;
@@ -38,15 +37,18 @@ export type WaiterQueue<ContextT, Handle> = {
 export class BlockingBacklogRejection<
   ContextT,
   Handle,
+  EnqueueOptionsT = EnqueueOptions,
 > implements AllotmentUnavailableStrategy<ContextT> {
   private readonly backlogSize: number;
   private readonly getBacklogTimeout: (context: ContextT) => number;
-  private readonly getEnqueueOptions: (context: ContextT) => EnqueueOptions;
-  private readonly queue: WaiterQueue<ContextT, Handle>;
+  private readonly getEnqueueOptions: (context: ContextT) => EnqueueOptionsT;
+  private readonly queue: WaiterQueue<ContextT, Handle, EnqueueOptionsT>;
   private drainInProgress = false;
   private releaseDuringDrain = false;
 
-  constructor(options: BlockingBacklogRejectionOptions<ContextT, Handle>) {
+  constructor(
+    options: BlockingBacklogRejectionOptions<ContextT, Handle, EnqueueOptionsT>,
+  ) {
     const backlogSize = options.backlogSize;
     if (Number.isNaN(backlogSize) || backlogSize < 0) {
       throw new RangeError("backlogSize must be greater than or equal to 0");
@@ -55,7 +57,7 @@ export class BlockingBacklogRejection<
     this.backlogSize = backlogSize;
     this.queue = options.queue;
     const backlogTimeout = options.backlogTimeout;
-    const enqueueDirection = options.enqueueDirection;
+    const enqueueOptions = options.enqueueOptions;
 
     this.getBacklogTimeout = (() => {
       if (typeof backlogTimeout === "number") {
@@ -69,10 +71,13 @@ export class BlockingBacklogRejection<
       };
     })();
 
-    this.getEnqueueOptions =
-      typeof enqueueDirection === "function"
-        ? (context) => ({ direction: enqueueDirection(context) })
-        : () => ({ direction: enqueueDirection });
+    if (typeof enqueueOptions === "function") {
+      this.getEnqueueOptions = enqueueOptions as (
+        context: ContextT,
+      ) => EnqueueOptionsT;
+    } else {
+      this.getEnqueueOptions = () => enqueueOptions;
+    }
   }
 
   onAllotmentUnavailable(
