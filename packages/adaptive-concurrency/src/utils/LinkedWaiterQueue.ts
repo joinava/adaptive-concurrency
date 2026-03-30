@@ -27,11 +27,18 @@ export class LinkedWaiterQueue<T extends object> {
   private readonly nodes = new Map<ItemHandle, LinkedNode<T>>();
   private maxPriority: number | undefined;
   private length = 0;
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
+  private resolveShutdown: (() => void) | undefined;
 
   enqueue(
     value: T,
     options: EnqueueOptions,
   ): { value: T; handle: ItemHandle } {
+    if (this.shuttingDown) {
+      throw new Error("queue has been shut down");
+    }
+
     const handle = new ItemHandle();
     const priority = options.priority ?? 0;
     if (!Number.isFinite(priority)) {
@@ -81,7 +88,20 @@ export class LinkedWaiterQueue<T extends object> {
     node.prev = undefined;
     node.next = undefined;
     this.length -= 1;
+    this.maybeResolveShutdown();
     return true;
+  }
+
+  shutdown(): Promise<void> {
+    if (!this.shuttingDown) {
+      this.shuttingDown = true;
+      this.shutdownPromise = new Promise<void>((resolve) => {
+        this.resolveShutdown = resolve;
+      });
+      this.maybeResolveShutdown();
+    }
+
+    return this.shutdownPromise!;
   }
 
   size(): number {
@@ -157,5 +177,14 @@ export class LinkedWaiterQueue<T extends object> {
       }
     }
     this.maxPriority = newMax;
+  }
+
+  private maybeResolveShutdown(): void {
+    if (!this.shuttingDown || this.length !== 0 || !this.resolveShutdown) {
+      return;
+    }
+
+    this.resolveShutdown();
+    this.resolveShutdown = undefined;
   }
 }
