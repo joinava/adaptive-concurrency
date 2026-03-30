@@ -2,7 +2,7 @@ import { GradientLimit } from "./limit/GradientLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import type { LimitAllotment } from "./LimitAllotment.js";
 import { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
-import type { Counter, MetricRegistry } from "./MetricRegistry.js";
+import type { Counter, Gauge, MetricRegistry } from "./MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "./MetricRegistry.js";
 import {
   isAdaptiveTimeoutError,
@@ -168,6 +168,7 @@ export class Limiter<Context = void> {
   private readonly ignoredCounter: Counter;
   private readonly rejectedCounter: Counter;
   private readonly bypassCounter: Counter;
+  private readonly limitGauge: Gauge;
 
   static makeDefaultLimit(): AdaptiveLimit {
     return new GradientLimit();
@@ -186,6 +187,7 @@ export class Limiter<Context = void> {
     this.limitAlgorithm.subscribe((newLimit) => {
       const oldLimit = this._limit;
       this._limit = newLimit;
+      this.limitGauge.record(newLimit);
       this.acquireStrategy.onLimitChanged?.(oldLimit, newLimit);
       void this.rejectionStrategy?.onLimitChanged?.(oldLimit, newLimit);
     });
@@ -193,7 +195,9 @@ export class Limiter<Context = void> {
     const registry = options.metricRegistry ?? NoopMetricRegistry;
     const limiterName = options.name ?? `unnamed-${++idCounter}`;
 
-    registry.gauge(MetricIds.LIMIT_NAME, () => this._limit);
+    this.limitGauge = registry.gauge(MetricIds.LIMIT_NAME, {
+      id: limiterName,
+    });
     this.successCounter = registry.counter(MetricIds.CALL_NAME, {
       id: limiterName,
       status: "success",

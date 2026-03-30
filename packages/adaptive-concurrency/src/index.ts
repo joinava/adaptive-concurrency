@@ -20,7 +20,7 @@ export {
   NoopMetricRegistry,
   type Counter,
   type DistributionMetric,
-  type GaugeMetric,
+  type Gauge,
   type MetricRegistry,
 } from "./MetricRegistry.js";
 export {

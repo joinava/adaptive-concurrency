@@ -269,10 +269,12 @@ Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now.
 | Counter type         | nested                                       | top-level `Counter`                                   |
 | `counter` tags       | varargs name/value pairs                     | object map `Record<string,string>`                    |
 | `distribution` tags  | varargs strings                              | varargs strings                                       |
-| `gauge`              | `Supplier<Number>` (registration often void) | `() => number` supplier; returns `GaugeMetric` handle |
+| `gauge`              | `Supplier<Number>` (registration often void) | attributes object + returned `Gauge` handle (`record(value)`) |
 | no-op registry       | singleton class                              | `NoopMetricRegistry` object constant                  |
 
 Shared metric **name** strings used by `Limiter`, `PartitionedStrategy`, and adaptive limits (e.g. `limit`, `call`, `inflight`, `min_rtt`) live in the `MetricIds` constant, co-exported from `MetricRegistry.ts` with `MetricRegistry` / `NoopMetricRegistry`.
+
+The main public API change to be aware of is that `MetricRegistry`'s gauge model changed from supplier-style registration to an explicit `Gauge.record(...)` handle.
 
 Java deprecated metric registration APIs (`registerDistribution`, `registerGauge`, `registerGuage`) are not present in TS.
 

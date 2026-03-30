@@ -1,7 +1,7 @@
 import type { AcquireStrategy, LimiterState } from "../../Limiter.js";
 import type {
   DistributionMetric,
-  GaugeMetric,
+  Gauge,
   MetricRegistry,
 } from "../../MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "../../MetricRegistry.js";
@@ -226,7 +226,7 @@ class Partition<PartitionName extends string = string> {
     | { kind: "capped"; maxBurstMultiplier: number }
     | { kind: "none" };
   public readonly inflightDistribution: DistributionMetric;
-  public readonly limitAtGlobalSaturationGauge: GaugeMetric;
+  public readonly limitAtGlobalSaturationGauge: Gauge;
 
   private _inflight = 0;
   private _limitAtGlobalSaturation: number;
@@ -258,16 +258,12 @@ class Partition<PartitionName extends string = string> {
     }
 
     const registry = init.registry;
-    this.inflightDistribution = registry.distribution(
-      MetricIds.INFLIGHT_NAME,
-      PARTITION_TAG_NAME,
-      this.name,
-    );
+    this.inflightDistribution = registry.distribution(MetricIds.INFLIGHT_NAME, {
+      [PARTITION_TAG_NAME]: this.name,
+    });
     this.limitAtGlobalSaturationGauge = registry.gauge(
       MetricIds.PARTITION_LIMIT_NAME,
-      () => this._limitAtGlobalSaturation,
-      PARTITION_TAG_NAME,
-      this.name,
+      { [PARTITION_TAG_NAME]: this.name },
     );
   }
 
@@ -282,6 +278,7 @@ class Partition<PartitionName extends string = string> {
       totalGlobalLimit,
       this.percent,
     );
+    this.limitAtGlobalSaturationGauge.record(this._limitAtGlobalSaturation);
   }
 
   get limitAtGlobalSaturation(): number {

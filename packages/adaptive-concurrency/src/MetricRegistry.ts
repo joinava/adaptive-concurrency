@@ -27,7 +27,9 @@ export interface Counter {
 }
 
 /** Opaque handle for a registered gauge (supplier is polled by the registry on flush). */
-export interface GaugeMetric {}
+export interface Gauge {
+  record(value: number): void;
+}
 
 /**
  * Simple abstraction for tracking metrics in the limiters.
@@ -42,7 +44,10 @@ export interface MetricRegistry {
    * @param tagNameValuePairs Pairs of tag name and tag value
    * @returns SampleListener for the caller to add samples
    */
-  distribution(id: string, ...tagNameValuePairs: string[]): DistributionMetric;
+  distribution(
+    id: string,
+    attributes?: Record<string, string>,
+  ): DistributionMetric;
 
   /**
    * Register a gauge using the provided supplier. The supplier will be polled
@@ -53,7 +58,7 @@ export interface MetricRegistry {
    * @param tagNameValuePairs Pairs of tag name and tag value
    * @returns Registration handle for the gauge
    */
-  gauge(id: string, supplier: () => number, ...tagNameValuePairs: string[]): GaugeMetric;
+  gauge(id: string, attributes?: Record<string, string>): Gauge;
 
   /**
    * Create a counter that will be incremented when an event occurs.
@@ -61,12 +66,12 @@ export interface MetricRegistry {
    * @param id Metric identifier
    * @param attributes Counter attributes/tags
    */
-  counter(id: string, attributes: Record<string, string>): Counter;
+  counter(id: string, attributes?: Record<string, string>): Counter;
 }
 
 const NOOP_SAMPLE_LISTENER: DistributionMetric = { addSample() {} };
 const NOOP_COUNTER: Counter = { increment() {} };
-const NOOP_GAUGE: GaugeMetric = {};
+const NOOP_GAUGE: Gauge = { record() {} };
 
 /**
  * No-op MetricRegistry that discards all metrics. Used as the default when
