@@ -234,6 +234,9 @@ export class Limiter<Context = void> {
         this.droppedCounter.increment();
       },
     };
+
+    // Emit metric for initial limit.
+    this.limitGauge.record(this._limit);
   }
 
   async acquire(options?: AcquireOptions<Context>): AcquireResult {
