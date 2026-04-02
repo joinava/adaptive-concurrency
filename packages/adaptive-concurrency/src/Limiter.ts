@@ -106,12 +106,6 @@ export interface AllotmentUnavailableStrategy<ContextT> {
 // ---------------------------------------------------------------------------
 // Limiter options
 // ---------------------------------------------------------------------------
-const NOOP_ALLOTMENT: LimitAllotment = {
-  async releaseAndRecordSuccess() {},
-  async releaseAndIgnore() {},
-  async releaseAndRecordDropped() {},
-};
-
 let idCounter = 0;
 
 export interface LimiterOptions<ContextT> {
@@ -161,13 +155,18 @@ export class Limiter<Context = void> {
   private readonly rejectionStrategy:
     | AllotmentUnavailableStrategy<Context>
     | undefined;
+
   private readonly bypassResolver: ((context: Context) => boolean) | undefined;
+  private readonly acquireBypassedAllotment: LimitAllotment;
 
   private readonly successCounter: Counter;
   private readonly droppedCounter: Counter;
   private readonly ignoredCounter: Counter;
-  private readonly rejectedCounter: Counter;
-  private readonly bypassCounter: Counter;
+
+  private readonly acquireSucceededCounter: Counter;
+  private readonly acquireFailedCounter: Counter;
+  private readonly acquireBypassedCounter: Counter;
+
   private readonly limitGauge: Gauge;
 
   static makeDefaultLimit(): AdaptiveLimit {
@@ -210,14 +209,31 @@ export class Limiter<Context = void> {
       id: limiterName,
       status: "ignored",
     });
-    this.rejectedCounter = registry.counter(MetricIds.CALL_NAME, {
-      id: limiterName,
-      status: "rejected",
-    });
-    this.bypassCounter = registry.counter(MetricIds.CALL_NAME, {
-      id: limiterName,
-      status: "bypassed",
-    });
+
+    this.acquireSucceededCounter = registry.counter(
+      MetricIds.ACQUIRE_ATTEMPT_NAME,
+      { id: limiterName, status: "succeeded" },
+    );
+    this.acquireFailedCounter = registry.counter(
+      MetricIds.ACQUIRE_ATTEMPT_NAME,
+      { id: limiterName, status: "failed" },
+    );
+    this.acquireBypassedCounter = registry.counter(
+      MetricIds.ACQUIRE_ATTEMPT_NAME,
+      { id: limiterName, status: "bypassed" },
+    );
+
+    this.acquireBypassedAllotment = {
+      releaseAndRecordSuccess: async () => {
+        this.successCounter.increment();
+      },
+      releaseAndIgnore: async () => {
+        this.ignoredCounter.increment();
+      },
+      releaseAndRecordDropped: async () => {
+        this.droppedCounter.increment();
+      },
+    };
   }
 
   async acquire(options?: AcquireOptions<Context>): AcquireResult {
@@ -225,8 +241,8 @@ export class Limiter<Context = void> {
     const ctx = (options?.context ?? undefined) as Context;
 
     if (this.bypassResolver?.(ctx)) {
-      this.bypassCounter.increment();
-      return NOOP_ALLOTMENT;
+      this.acquireBypassedCounter.increment();
+      return this.acquireBypassedAllotment;
     }
 
     const state: LimiterState = {
@@ -235,7 +251,7 @@ export class Limiter<Context = void> {
     };
 
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
-      this.rejectedCounter.increment();
+      this.acquireFailedCounter.increment();
       if (!this.rejectionStrategy) {
         return undefined;
       }
@@ -257,6 +273,7 @@ export class Limiter<Context = void> {
       );
     }
 
+    this.acquireSucceededCounter.increment();
     const allotment = this.createAllotment(ctx);
 
     if (options?.signal?.aborted) {
@@ -274,9 +291,11 @@ export class Limiter<Context = void> {
       inflight: this._inflight,
     };
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
+      this.acquireFailedCounter.increment();
       return undefined;
     }
 
+    this.acquireSucceededCounter.increment();
     return this.createAllotment(ctx);
   }
 

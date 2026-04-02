@@ -1,9 +1,15 @@
 /**
  * Common metric ids used by the limiters and limit algorithms.
+ *
+ * `CALL_NAME` records outcomes for work that actually executed under a limiter
+ * (status: `success`, `ignored`, `dropped`). `ACQUIRE_ATTEMPT_NAME` records
+ * acquire outcomes (status: `succeeded`, `failed`, `bypassed`), including
+ * failures from retry attempts.
  */
 export const MetricIds = {
   LIMIT_NAME: "limit",
   CALL_NAME: "call",
+  ACQUIRE_ATTEMPT_NAME: "acquire_attempt",
   INFLIGHT_NAME: "inflight",
   PARTITION_LIMIT_NAME: "limit.partition",
   MIN_RTT_NAME: "min_rtt",

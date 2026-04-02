@@ -9,7 +9,7 @@
     "dynamic rate limiting"
   ],
   "author": "Ethan Resnick <ethan.resnick@gmail.com>",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "exports": {
     ".": {
@@ -26,6 +26,7 @@
     "prepublishOnly": "pnpm build"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "tsx": "^4.19.0",
     "type-fest": "^5.5.0",
     "type-party": "^0.7.3",

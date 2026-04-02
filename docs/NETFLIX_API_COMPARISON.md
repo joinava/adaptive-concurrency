@@ -274,6 +274,8 @@ Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now.
 
 Shared metric **name** strings used by `Limiter`, `PartitionedStrategy`, and adaptive limits (e.g. `limit`, `call`, `inflight`, `min_rtt`) live in the `MetricIds` constant, co-exported from `MetricRegistry.ts` with `MetricRegistry` / `NoopMetricRegistry`.
 
+Metric semantics differ slightly from the Java implementation. In Java, `MetricIds.CALL_NAME` is used for **all** limiter outcomes: `success`, `dropped`, `ignored`, plus acquire-time `rejected` and `bypassed` (see `AbstractLimiter.createRejectedListener` / `createBypassListener`). That means the Java `call` metric mixes "we executed the downstream" outcomes with "we could not acquire a slot" outcomes. In this TypeScript port, those are split: `call` is only for post-acquire outcomes, and `acquire_attempt` captures `succeeded`, `failed`, and `bypassed` acquisition results (including retries).
+
 The main public API change to be aware of is that `MetricRegistry`'s gauge model changed from supplier-style registration to an explicit `Gauge.record(...)` handle.
 
 Java deprecated metric registration APIs (`registerDistribution`, `registerGauge`, `registerGuage`) are not present in TS.
