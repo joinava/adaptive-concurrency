@@ -2,7 +2,12 @@ import { GradientLimit } from "./limit/GradientLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import type { LimitAllotment } from "./LimitAllotment.js";
 import { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
-import type { Counter, Gauge, MetricRegistry } from "./MetricRegistry.js";
+import type {
+  Counter,
+  DistributionMetric,
+  Gauge,
+  MetricRegistry,
+} from "./MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "./MetricRegistry.js";
 import {
   isAdaptiveTimeoutError,
@@ -168,6 +173,8 @@ export class Limiter<Context = void> {
   private readonly acquireBypassedCounter: Counter;
 
   private readonly limitGauge: Gauge;
+  private readonly acquireTimeOnSuccessDistribution: DistributionMetric;
+  private readonly acquireTimeOnUnavailableDistribution: DistributionMetric;
 
   static makeDefaultLimit(): AdaptiveLimit {
     return new GradientLimit();
@@ -223,6 +230,15 @@ export class Limiter<Context = void> {
       { id: limiterName, status: "bypassed" },
     );
 
+    this.acquireTimeOnSuccessDistribution = registry.distribution(
+      MetricIds.ACQUIRE_TIME_NAME,
+      { id: limiterName, status: "success" },
+    );
+    this.acquireTimeOnUnavailableDistribution = registry.distribution(
+      MetricIds.ACQUIRE_TIME_NAME,
+      { id: limiterName, status: "unavailable" },
+    );
+
     this.acquireBypassedAllotment = {
       releaseAndRecordSuccess: async () => {
         this.successCounter.increment();
@@ -248,6 +264,8 @@ export class Limiter<Context = void> {
       return this.acquireBypassedAllotment;
     }
 
+    const acquireStart = this.clock();
+
     const state: LimiterState = {
       limit: this._limit,
       inflight: this._inflight,
@@ -256,15 +274,20 @@ export class Limiter<Context = void> {
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
       this.acquireFailedCounter.increment();
       if (!this.rejectionStrategy) {
+        this.acquireTimeOnUnavailableDistribution.addSample(
+          this.clock() - acquireStart,
+        );
         return undefined;
       }
 
-      // if signal aborted here, nothing to cleanup, as we didn't acquire anything.
+      // if signal aborted here, nothing to cleanup, as we didn't acquire
+      // anything. Also, don't try to record the acquire time, as we aborted
+      // mid-way (didn't invoke the rejection strategy).
       if (options?.signal?.aborted) {
         return undefined;
       }
 
-      return this.rejectionStrategy.onAllotmentUnavailable(
+      const result = await this.rejectionStrategy.onAllotmentUnavailable(
         ctx,
         async (retryCtx) => {
           if (options?.signal?.aborted) {
@@ -274,10 +297,23 @@ export class Limiter<Context = void> {
         },
         options?.signal,
       );
+
+      const distribution = result
+        ? this.acquireTimeOnSuccessDistribution
+        : this.acquireTimeOnUnavailableDistribution;
+      distribution.addSample(this.clock() - acquireStart);
+
+      return result;
     }
 
     this.acquireSucceededCounter.increment();
     const allotment = this.createAllotment(ctx);
+
+    // Record the acquire time as a success, since we did actually succeed even
+    // if we abort below.
+    this.acquireTimeOnSuccessDistribution.addSample(
+      this.clock() - acquireStart,
+    );
 
     if (options?.signal?.aborted) {
       // here, we did acquire, so we need to try to cleanup.

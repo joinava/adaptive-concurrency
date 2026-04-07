@@ -15,6 +15,7 @@ export const MetricIds = {
   MIN_RTT_NAME: "min_rtt",
   WINDOW_MIN_RTT_NAME: "min_window_rtt",
   WINDOW_QUEUE_SIZE_NAME: "queue_size",
+  ACQUIRE_TIME_NAME: "acquire_time",
 } as const;
 
 /**
