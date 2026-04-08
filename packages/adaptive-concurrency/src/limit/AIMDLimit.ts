@@ -23,8 +23,8 @@ export interface AIMDLimitOptions {
   timeout?: number;
 
   /**
-   * Fraction of `backoffRatio` to use as a +/- jitter band around each
-   * multiplicative decrease. Breaks lockstep oscillation when multiple
+   * Absolute amount to use as a +/- jitter band around `backoffRatio` for
+   * each multiplicative decrease. Breaks lockstep oscillation when multiple
    * independent clients share the same configuration.
    *
    * For example, with `backoffRatio: 0.9` and `backoffJitter: 0.02`, each
