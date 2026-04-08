@@ -1,7 +1,6 @@
 import { ListenerSet } from "../ListenerSet.js";
-import { MetricIds } from "../MetricRegistry.js";
 import type { DistributionMetric, MetricRegistry } from "../MetricRegistry.js";
-import { NoopMetricRegistry } from "../MetricRegistry.js";
+import { MetricIds, NoopMetricRegistry } from "../MetricRegistry.js";
 import type { AdaptiveLimit } from "./StreamingLimit.js";
 
 /**
@@ -46,28 +45,29 @@ export interface VegasLimitOptions {
      * size; below it the limit is increased aggressively.
      */
     alpha?(limit: number): number;
-  
+
     /**
      * Function to compute the beta threshold as a function of the current
      * estimated limit. Beta is the upper threshold; above it the limit is
      * decreased.
      */
     beta?(limit: number): number;
-  
+
     /**
      * Threshold below which the limit is increased by beta (aggressive).
      */
     threshold?(limit: number): number;
-  
+
     /**
      * Compute the new limit when increasing.
      */
     increase?(limit: number): number;
-  
+
     /**
-     * Compute the new limit when decreasing.
+     * Compute the new limit when decreasing. If didDrop is true, decrease() is
+     * being called because of a drop.
      */
-    decrease?(limit: number): number;
+    decrease?(limit: number, didDrop: boolean): number;
   };
 
   /**
@@ -79,7 +79,9 @@ export interface VegasLimitOptions {
   metricRegistry?: MetricRegistry;
 }
 
-export type VegasLimitPolicy = Required<NonNullable<VegasLimitOptions["policy"]>>;
+export type VegasLimitPolicy = Required<
+  NonNullable<VegasLimitOptions["policy"]>
+>;
 
 export class VegasLimit implements AdaptiveLimit {
   private _limit: number;
@@ -96,9 +98,10 @@ export class VegasLimit implements AdaptiveLimit {
   private readonly smoothing: number;
   private readonly policy: VegasLimitPolicy;
   private readonly rttSampleListener: DistributionMetric;
-  private readonly probeMultiplier: number;
+
   private probeCount = 0;
   private probeJitter: number;
+  private readonly probeMultiplier: number;
 
   constructor(options: VegasLimitOptions = {}) {
     const initialLimit = options.initialLimit ?? 20;
@@ -113,8 +116,10 @@ export class VegasLimit implements AdaptiveLimit {
       alpha: options.policy?.alpha ?? ((limit) => 3 * log10Scale(limit)),
       beta: options.policy?.beta ?? ((limit) => 6 * log10Scale(limit)),
       threshold: options.policy?.threshold ?? log10Scale,
-      increase: options.policy?.increase ?? ((limit) => limit + log10Scale(limit)),
-      decrease: options.policy?.decrease ?? ((limit) => limit - log10Scale(limit)),
+      increase:
+        options.policy?.increase ?? ((limit) => limit + log10Scale(limit)),
+      decrease:
+        options.policy?.decrease ?? ((limit) => limit - log10Scale(limit)),
     };
 
     this.probeJitter = this.resetProbeJitter();
@@ -129,7 +134,10 @@ export class VegasLimit implements AdaptiveLimit {
   }
 
   private shouldProbe(): boolean {
-    return this.probeJitter * this.probeMultiplier * this.estimatedLimit <= this.probeCount;
+    return (
+      this.probeJitter * this.probeMultiplier * this.estimatedLimit <=
+      this.probeCount
+    );
   }
 
   addSample(
@@ -138,7 +146,9 @@ export class VegasLimit implements AdaptiveLimit {
     inflight: number,
     didDrop: boolean,
   ): void {
-    this.applyNewLimit(this.computeNextLimit(startTime, rtt, inflight, didDrop));
+    this.applyNewLimit(
+      this.computeNextLimit(startTime, rtt, inflight, didDrop),
+    );
   }
 
   get currentLimit(): number {
@@ -200,8 +210,8 @@ export class VegasLimit implements AdaptiveLimit {
     let newLimit: number;
     // Treat any drop (i.e timeout) as needing to reduce the limit
     if (didDrop) {
-      newLimit = this.policy.decrease(estimatedLimit);
-    // Prevent upward drift if not close to the limit
+      newLimit = this.policy.decrease(estimatedLimit, didDrop);
+      // Prevent upward drift if not close to the limit
     } else if (inflight * 2 < estimatedLimit) {
       return Math.floor(estimatedLimit);
     } else {
@@ -212,20 +222,21 @@ export class VegasLimit implements AdaptiveLimit {
       // Aggressive increase when no queuing
       if (queueSize <= threshold) {
         newLimit = estimatedLimit + beta;
-      // Increase the limit if queue is still manageable
+        // Increase the limit if queue is still manageable
       } else if (queueSize < alpha) {
         newLimit = this.policy.increase(estimatedLimit);
-      // Detecting latency so decrease
+        // Detecting latency so decrease
       } else if (queueSize > beta) {
-        newLimit = this.policy.decrease(estimatedLimit);
-      // We're within the sweet spot so nothing to do
+        newLimit = this.policy.decrease(estimatedLimit, didDrop);
+        // We're within the sweet spot so nothing to do
       } else {
         return Math.floor(estimatedLimit);
       }
     }
 
     newLimit = Math.max(1, Math.min(this.maxLimit, newLimit));
-    newLimit = (1 - this.smoothing) * estimatedLimit + this.smoothing * newLimit;
+    newLimit =
+      (1 - this.smoothing) * estimatedLimit + this.smoothing * newLimit;
     this.estimatedLimit = newLimit;
     return Math.floor(newLimit);
   }
