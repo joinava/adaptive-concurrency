@@ -29,7 +29,7 @@ export interface AIMDLimitOptions {
    *
    * For example, with `backoffRatio: 0.9` and `backoffJitter: 0.02`, each
    * decrease multiplies by a uniformly random value in [0.88, 0.92].
-   * Must be in [0, 0.05]. Default: 0.02.
+   * Must be in [0, 0.05]. Default: 0.
    */
   backoffJitter?: number;
 }
@@ -52,7 +52,7 @@ export class AIMDLimit implements AdaptiveLimit {
     this.timeout = options.timeout ?? 5_000;
     this.minLimit = options.minLimit ?? 20;
     this.maxLimit = options.maxLimit ?? 200;
-    this.backoffJitter = options.backoffJitter ?? 0.02;
+    this.backoffJitter = options.backoffJitter ?? 0;
 
     if (this.backoffRatio >= 1.0 || this.backoffRatio < 0.5) {
       throw new Error("Backoff ratio must be in the range [0.5, 1.0)");
