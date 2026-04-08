@@ -2,7 +2,7 @@
 
 Automatically detect and adjust services' concurrency limits to achieve optimal throughput with optimal latency and availability. This keeps systems reliable and available without constant manual tuning of concurrency limits as system performance/topology evolves. It borrows concepts from TCP congestion control and other algorithms.
 
-This package is a TypeScript adaptation of [Netflix's concurrency-limits](https://github.com/Netflix/concurrency-limits) library. However, API has been [adjusted substantially](./docs/NETFLIX_API_COMPARISON.md) to better suit TypeScript's type system, and JavaScript's idioms and concurrency model.
+This package was originally a TypeScript adaptation of [Netflix's concurrency-limits](https://github.com/Netflix/concurrency-limits) library. However, extra functionality has been added, and the API has been [adjusted substantially](./docs/NETFLIX_API_COMPARISON.md) to better suit TypeScript's type system and JavaScript's idioms and concurrency model.
 
 ## Background
 
