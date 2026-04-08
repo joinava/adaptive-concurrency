@@ -66,10 +66,11 @@ class ImmutablePercentileSampleWindow implements SampleWindow {
     if (this._sampleCount === 0) {
       return 0;
     }
-    const sorted = this.observedRtts.slice(0, this._sampleCount).sort((a, b) => a - b);
-    const rttIndex = Math.round(this._sampleCount * this.percentile);
-    const zeroBasedIndex = rttIndex - 1;
-    return sorted[zeroBasedIndex]!;
+    const k = Math.round(this._sampleCount * this.percentile) - 1;
+    // Slice first so quickselect's in-place mutations don't affect
+    // other window instances that share the same backing array.
+    const copy = this.observedRtts.slice(0, this._sampleCount);
+    return quickselect(copy, k, 0, this._sampleCount - 1);
   }
 
   get maxInFlight(): number {
@@ -109,4 +110,44 @@ export function createPercentileSampleWindow(
   }
 
   return new ImmutablePercentileSampleWindow({ percentile, windowSize });
+}
+
+/**
+ * In-place Hoare-partition quickselect. Returns the k-th smallest element
+ * (0-indexed) within arr[lo..hi]. Mutates the array, but only within
+ * the [lo, hi] range.
+ */
+function quickselect(
+  arr: number[],
+  k: number,
+  lo: number,
+  hi: number,
+): number {
+  while (lo < hi) {
+    const pivot = arr[lo + ((hi - lo) >> 1)]!;
+    let i = lo;
+    let j = hi;
+
+    while (i <= j) {
+      while (arr[i]! < pivot) i++;
+      while (arr[j]! > pivot) j--;
+      if (i <= j) {
+        const tmp = arr[i]!;
+        arr[i] = arr[j]!;
+        arr[j] = tmp;
+        i++;
+        j--;
+      }
+    }
+
+    if (k <= j) {
+      hi = j;
+    } else if (k >= i) {
+      lo = i;
+    } else {
+      break;
+    }
+  }
+
+  return arr[k]!;
 }
