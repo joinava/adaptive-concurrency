@@ -208,7 +208,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       subscribe() {
         return () => {};
       },
-      addSample(startTime, rtt, inflight, didDrop) {
+      addSample(startTime, rtt, inflight, didDrop, _operationName) {
         samples.push({ startTime, rtt, inflight, didDrop });
       },
     };

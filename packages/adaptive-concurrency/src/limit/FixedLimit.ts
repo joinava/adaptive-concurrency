@@ -17,6 +17,7 @@ export class FixedLimit implements AdaptiveLimit {
     _rtt: number,
     _inflight: number,
     _didDrop: boolean,
+    _operationName?: string,
   ): void {
   }
 

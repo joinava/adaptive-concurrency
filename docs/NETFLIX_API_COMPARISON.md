@@ -64,12 +64,14 @@ Because JavaScript is single-threaded, "blocking" means promise-based waiting, n
 
 ### `Limit` -> `AdaptiveLimit`
 
-| Java `Limit`                                  | TypeScript `AdaptiveLimit`                     |
-| --------------------------------------------- | ---------------------------------------------- |
-| `int getLimit()`                              | `currentLimit` getter                          |
-| `notifyOnChange(Consumer<Integer>)`           | `subscribe(listener, { signal? }): () => void` |
-| `onSample(startNs, rttNs, inflight, didDrop)` | `addSample(startMs, rttMs, inflight, didDrop)` |
-| nanosecond time units                         | fractional milliseconds                        |
+| Java `Limit`                                  | TypeScript `AdaptiveLimit`                                        |
+| --------------------------------------------- | ----------------------------------------------------------------- |
+| `int getLimit()`                              | `currentLimit` getter                                             |
+| `notifyOnChange(Consumer<Integer>)`           | `subscribe(listener, { signal? }): () => void`                    |
+| `onSample(startNs, rttNs, inflight, didDrop)` | `addSample(startMs, rttMs, inflight, didDrop, operationName?)`    |
+| nanosecond time units                         | fractional milliseconds                                           |
+
+The TypeScript `addSample` accepts an optional fifth parameter, `operationName?: string`, used by group-aware limits (e.g. `GroupAwareLimit`) to distinguish heterogeneous workloads. All existing limit implementations accept and ignore the parameter.
 
 Time conversion is a key migration concern: Java nanoseconds vs TypeScript milliseconds.
 
@@ -94,6 +96,10 @@ Semantics are equivalent: exactly one completion method should be called.
 | context passed positionally            | options object (`{ context, signal? }`)                          |
 
 TypeScript `AcquireOptions` adds `signal?: AbortSignal`.
+
+### `LimiterOptions.operationNameFor`
+
+No Java equivalent. TypeScript `LimiterOptions` accepts an optional `operationNameFor?: (context) => string | undefined` callback that derives an operation name from the request context. The returned name is forwarded to `AdaptiveLimit.addSample()` so group-aware limits (e.g. `GroupAwareLimit`) can maintain separate baselines per operation type.
 
 ### Bypass configuration
 
@@ -217,9 +223,14 @@ All algorithm time inputs/options in TypeScript use milliseconds (not Java nanos
 
 - Policy hooks are grouped under `policy`:
   - `alpha`, `beta`, `threshold`, `increase`, `decrease`
-- All policy functions are `(limit: number) => number`.
+- `alpha`, `beta`, `threshold`, and `increase` are `(limit: number) => number`.
+- `decrease` is `(limit: number, didDrop: boolean) => number`, so the policy can distinguish latency-driven decreases from drop-driven ones.
 - Java deprecated builder methods (`alpha(...)`, `beta(...)`, `tolerance(...)`, `backoffRatio(...)`) are not carried over.
-- Java `Log10RootIntFunction` is not a standalone class in TS; equivalent behavior is an internal `log10Scale` helper.
+- Java `Log10RootIntFunction` is not a standalone class in TS; equivalent behavior is an exported `log10Scale` helper in `utils`.
+
+### `AIMDLimit`
+
+- TypeScript adds a `backoffJitter` option (default `0.02`): an absolute +/- jitter band around `backoffRatio` applied to each multiplicative decrease. This breaks lockstep oscillation when multiple independent clients share the same configuration. Must be in `[0, 0.05]`.
 
 ### `Gradient2Limit` naming
 
@@ -236,11 +247,10 @@ All algorithm time inputs/options in TypeScript use milliseconds (not Java nanos
 - Factory style is function-based (`sampleWindowFactory?: () => SampleWindow`).
 - TS adds `createPercentileSampleWindow(...)` in addition to average windows.
 
-### `FixedLimit`, `SettableLimit`, `TracingLimitDecorator`
+### `FixedLimit`, `SettableLimit`
 
 - `FixedLimit` and `SettableLimit` implement `AdaptiveLimit` directly.
 - `SettableLimit.setLimit(...)` has no synchronization concerns (single-threaded runtime model).
-- `TracingLimitDecorator` logs via `console.debug` instead of SLF4J.
 
 ### Gradient v1
 
@@ -276,6 +286,10 @@ Shared metric **name** strings used by `Limiter`, `PartitionedStrategy`, and ada
 
 Metric semantics differ slightly from the Java implementation. In Java, `MetricIds.CALL_NAME` is used for **all** limiter outcomes: `success`, `dropped`, `ignored`, plus acquire-time `rejected` and `bypassed` (see `AbstractLimiter.createRejectedListener` / `createBypassListener`). That means the Java `call` metric mixes "we executed the downstream" outcomes with "we could not acquire a slot" outcomes. In this TypeScript port, those are split: `call` is only for post-acquire outcomes, and `acquire_attempt` captures `succeeded`, `failed`, and `bypassed` acquisition results (including retries).
 
+Additionally, the TypeScript port tracks `acquire_time` as a distribution metric (`MetricIds.ACQUIRE_TIME_NAME`) with status `success` or `unavailable`, measuring how long `acquire()` takes (including any time spent in rejection strategies such as blocking or delayed rejection). This has no Java equivalent.
+
+Bypassed requests now track call-level outcomes (success/ignored/dropped) through the bypass allotment, rather than using a no-op allotment as previously.
+
 The main public API change to be aware of is that `MetricRegistry`'s gauge model changed from supplier-style registration to an explicit `Gauge.record(...)` handle.
 
 Java deprecated metric registration APIs (`registerDistribution`, `registerGauge`, `registerGuage`) are not present in TS.
@@ -295,11 +309,12 @@ Java deprecated metric registration APIs (`registerDistribution`, `registerGauge
 
 Implementation mapping:
 
-| Java                 | TypeScript                          |
-| -------------------- | ----------------------------------- |
-| `ExpAvgMeasurement`  | `ExpMovingAverage`                  |
-| `MinimumMeasurement` | `MinimumValue`                      |
-| -                    | `MostRecentValue` (new TS addition) |
+| Java                 | TypeScript                               |
+| -------------------- | ---------------------------------------- |
+| `ExpAvgMeasurement`  | `ExpMovingAverage`                       |
+| `MinimumMeasurement` | `MinimumValue`                           |
+| -                    | `MostRecentValue` (new TS addition)      |
+| -                    | `DecayingHistogram` (new TS addition)    |
 
 ---
 
@@ -328,7 +343,8 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 ## 11. Removed or not-ported Java items
 
 - `LimiterRegistry` convenience abstraction is not present.
-- Standalone `Log10RootIntFunction` class is not present.
+- Standalone `Log10RootIntFunction` class is not present (equivalent `log10Scale` is exported from utils).
+- `TracingLimitDecorator` was previously ported but has been removed. If tracing is needed, subscribe to `AdaptiveLimit` change events or wrap at the `MetricRegistry` level.
 - Java gRPC integration modules are not ported in this repo.
 
 ---
@@ -337,6 +353,7 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 
 - `withLimiter(limiter)`
 - `RunResult` + `success/ignore/dropped`
+- `GroupAwareLimit` — mix-agnostic limit algorithm with per-group RTT baselines
 - `QuotaNotAvailable` sentinel
 - `LimiterState` strategy input
 - `AcquireStrategy` / `AllotmentUnavailableStrategy` public extension points
@@ -345,6 +362,12 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 - `ListenerSet`
 - `createPercentileSampleWindow(...)`
 - `MostRecentValue`
+- `DecayingHistogram` - A histogram with log-spaced bins and continuous exponential time decay. Provides approximate percentile queries in O(numBins) time and fixed memory.
+- `LimiterOptions.operationNameFor` — derives operation names from context for group-aware limits
+- `AdaptiveLimit.addSample()` `operationName` parameter
+- `AIMDLimit.backoffJitter` option
+- `acquire_attempt` metric (`MetricIds.ACQUIRE_ATTEMPT_NAME`)
+- `acquire_time` distribution metric (`MetricIds.ACQUIRE_TIME_NAME`)
 - broad `AbortSignal` support in acquire/rejection/subscribe APIs
 - `squareRoot(...)` and `squareRootWithBaseline(...)` helpers
 - `AdaptiveTimeoutError`, `isAdaptiveTimeoutError(...)`
@@ -375,8 +398,9 @@ When upstream Java commits change behavior, likely TS touchpoints are:
 - partition logic -> `limiter/acquire-strategies/PartitionedStrategy.ts`
 - blocking behavior -> `limiter/allocation-unavailable-strategies/BlockingBacklogRejection.ts`, `limiter/allocation-unavailable-strategies/DelayedThenBlockingRejection.ts`
 - Java partition reject delay -> `limiter/allocation-unavailable-strategies/DelayedRejectStrategy.ts` (optional; compose with `delayMsForContext` or via factory `delayMs`)
-- algorithm math -> files under `limit/`
+- algorithm math -> files under `limit/` (including `GroupAwareLimit.ts`, `DecayingHistogram.ts`)
 - metrics tagging/counters -> `MetricRegistry.ts` (`MetricIds`) + limiter/strategy call sites
+- operation name plumbing -> `StreamingLimit.ts` (`AdaptiveLimit.addSample` signature), `Limiter.ts` (`operationNameFor`)
 - servlet integration deltas -> `packages/http` (or new integration package work)
 
 Because this port factors behavior into strategies, a Java change in `SimpleLimiter` vs `AbstractPartitionedLimiter` may map to the same TypeScript `Limiter` with different options rather than new classes.

@@ -176,33 +176,49 @@ app.use(concurrencyLimitMiddleware(limiter));
 
 ## Limit Algorithms
 
+
+### GroupAwareLimit [New]
+
+An ideal limit when a single limiter protects a downstream that handles heterogenous operations using shared resources. E.g., imagine an API that supports some very quick/cheap operations and some very slow ones, with both types of operations sharing the same database. A `GroupAwareLimit` put in front of that API will detect congestion using per-group (i.e., per-operation-type) RTT spikes.
+
+This is immune to operation mix shifts: when traffic transitions from fast to slow operations, standard algorithms see an RTT spike and erroneously reduce the limit. `GroupAwareLimit` avoids this because each group is measured against its own baseline.
+
+Compared to using a separate limiter per operation type, the single `GroupAwareLimit` is more stable -- it better handles some operation types having few samples and propagates a drop signal from the backend through the whole limit (not just the limiter for whichever operation happened to witness the drop). See code for details.
+
+```typescript
+import { Limiter, GroupAwareLimit } from "adaptive-concurrency";
+
+const limiter = new Limiter<string>({
+  limit: new GroupAwareLimit({ initialLimit: 20, maxLimit: 200 }),
+  operationNameFor: (ctx) => someOperationName, // derive from request metadata
+});
+```
+
 ### VegasLimit
 
-Delay-based algorithm inspired by TCP Vegas. Estimates queue size as `limit × (1 − RTTnoLoad / RTTactual)` and adjusts the limit based on whether the queue is above or below configurable thresholds.
+Delay-based algorithm inspired by TCP Vegas. Estimates queue size as `limit × (1 − RTTnoLoad / RTTactual)` and adjusts the limit based on whether the queue is above or below configurable thresholds. The `policy.decrease` function receives `(limit, didDrop)` so the policy can distinguish latency-driven decreases from drop-driven ones.
 
 ### GradientLimit
 
 Adjusts the limit based on the gradient between a long-term exponentially smoothed average RTT and the current short-term RTT. Uses average instead of minimum RTT to handle bursty RPC workloads.
 
 This matches Netflix's **Gradient2Limit** algorithm, not the deprecated v1 algorithm called GradientLimit in their package.
-
 ### AIMDLimit
 
-Simple additive-increase/multiplicative-decrease algorithm. Increases the limit by 1 on success and multiplies by a backoff ratio on drops or timeouts.
+Simple additive-increase/multiplicative-decrease algorithm. Increases the limit by 1 on success and multiplies by a backoff ratio on drops or timeouts. Supports a `backoffJitter` option (default `0.02`) that adds a small random perturbation to each decrease, breaking lockstep oscillation when multiple independent clients share the same configuration.
 
 ### WindowedLimit
 
 Decorator that buffers samples into time-based windows before forwarding aggregated results to a delegate algorithm, reducing noise from individual samples.
 
-### FixedLimit / SettableLimit / TracingLimitDecorator
+### FixedLimit / SettableLimit
 
 - **`FixedLimit`** — constant, non-adaptive limit.
 - **`SettableLimit`** — mutable limit, useful for tests/manual control.
-- **`TracingLimitDecorator`** — wraps a limit and emits debug logs on updates.
 
 ## Limiter building blocks
 
-- **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**.
+- **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**, and optional **`operationNameFor`** to tag samples for group-aware limits.
 - **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. Combine with `Limiter` via `acquireStrategy`.
 - **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function.
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.

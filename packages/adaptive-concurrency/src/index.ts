@@ -44,8 +44,8 @@ export {
   GradientLimit,
   type Gradient2LimitOptions,
 } from "./limit/GradientLimit.js";
+export { GroupAwareLimit } from "./limit/GroupAwareLimit.js";
 export { SettableLimit } from "./limit/SettableLimit.js";
-export { TracingLimitDecorator } from "./limit/TracingLimitDecorator.js";
 export {
   VegasLimit,
   type VegasLimitOptions,
@@ -57,6 +57,7 @@ export {
 } from "./limit/WindowedLimit.js";
 
 // Streaming statistics
+export { DecayingHistogram } from "./statistics/DecayingHistogram.js";
 export { ExpMovingAverage } from "./statistics/ExpMovingAverage.js";
 export { MinimumValue } from "./statistics/MinimumValue.js";
 export type { StreamingStatistic } from "./statistics/StreamingStatistic.js";
@@ -68,6 +69,7 @@ export type { SampleWindow } from "./limit/window/SampleWindow.js";
 
 export {
   LinkedWaiterQueue,
+  log10Scale,
   squareRoot,
   squareRootWithBaseline,
 } from "./utils/index.js";

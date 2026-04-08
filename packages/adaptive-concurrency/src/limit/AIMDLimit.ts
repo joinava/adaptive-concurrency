@@ -75,6 +75,7 @@ export class AIMDLimit implements AdaptiveLimit {
     rtt: number,
     inflight: number,
     didDrop: boolean,
+    _operationName?: string,
   ): void {
     let currentLimit = this._limit;
 
