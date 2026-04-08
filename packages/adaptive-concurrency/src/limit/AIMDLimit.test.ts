@@ -7,6 +7,7 @@ describe("AIMDLimit", () => {
     const limit = new AIMDLimit({
       initialLimit: 100,
       backoffRatio: 0.9,
+      backoffJitter: 0,
     });
 
     limit.addSample(0, 1, 100, true);
@@ -17,11 +18,33 @@ describe("AIMDLimit", () => {
     const limit = new AIMDLimit({
       initialLimit: 100,
       backoffRatio: 0.9,
+      backoffJitter: 0,
       timeout: 1000,
     });
 
     limit.addSample(0, 2000, 100, false);
     assert.equal(limit.currentLimit, 90);
+  });
+
+  it("should apply jitter to the backoff ratio", () => {
+    const observed = new Set<number>();
+    for (let trial = 0; trial < 50; trial++) {
+      const limit = new AIMDLimit({
+        initialLimit: 1000,
+        backoffRatio: 0.9,
+        backoffJitter: 0.05,
+        minLimit: 1,
+        maxLimit: 2000,
+      });
+
+      limit.addSample(0, 1, 1000, true);
+      observed.add(limit.currentLimit);
+    }
+
+    assert.ok(
+      observed.size > 1,
+      `Expected jitter to produce varying limits, but all 50 trials gave the same value`,
+    );
   });
 
   it("should increase limit when inflight is at least half the current limit", () => {
@@ -47,9 +70,9 @@ describe("AIMDLimit", () => {
       initialLimit: 20,
       minLimit: 10,
       backoffRatio: 0.5,
+      backoffJitter: 0,
     });
 
-    // Repeated drops should not push below minLimit
     for (let i = 0; i < 20; i++) {
       limit.addSample(0, 1, limit.currentLimit, true);
     }
@@ -62,7 +85,6 @@ describe("AIMDLimit", () => {
       maxLimit: 30,
     });
 
-    // Repeated successful samples should not push above maxLimit
     for (let i = 0; i < 100; i++) {
       limit.addSample(0, 1, limit.currentLimit, false);
     }
@@ -84,6 +106,17 @@ describe("AIMDLimit", () => {
     assert.throws(
       () => new AIMDLimit({ timeout: 0 }),
       /Timeout must be positive/,
+    );
+  });
+
+  it("should throw on invalid backoffJitter", () => {
+    assert.throws(
+      () => new AIMDLimit({ backoffJitter: -0.01 }),
+      /backoffJitter must be in the range/,
+    );
+    assert.throws(
+      () => new AIMDLimit({ backoffJitter: 0.06 }),
+      /backoffJitter must be in the range/,
     );
   });
 
