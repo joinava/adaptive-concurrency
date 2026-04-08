@@ -16,6 +16,9 @@ export const MetricIds = {
   WINDOW_MIN_RTT_NAME: "min_window_rtt",
   WINDOW_QUEUE_SIZE_NAME: "queue_size",
   ACQUIRE_TIME_NAME: "acquire_time",
+  CONGESTION_SIGNAL_NAME: "congestion_signal",
+  WARMED_GROUPS_COUNT_NAME: "warmed_groups_count",
+  GROUP_RTT_RATIO_NAME: "group_rtt_ratio",
 } as const;
 
 /**

@@ -5,9 +5,9 @@ import type { SampleWindow } from "./window/SampleWindow.js";
 /** Minimum observed samples to filter out windows with insufficient data */
 const DEFAULT_WINDOW_SIZE = 10;
 
-const DEFAULT_MIN_WINDOW_TIME = 1_000;     // 1 second in ms
-const DEFAULT_MAX_WINDOW_TIME = 1_000;     // 1 second in ms
-const DEFAULT_MIN_RTT_THRESHOLD = 0.1;     // 100 microseconds in ms
+const DEFAULT_MIN_WINDOW_TIME = 1_000; // 1 second in ms
+const DEFAULT_MAX_WINDOW_TIME = 1_000; // 1 second in ms
+const DEFAULT_MIN_RTT_THRESHOLD = 0.1; // 100 microseconds in ms
 
 export interface WindowedLimitOptions {
   /**
@@ -40,6 +40,13 @@ export interface WindowedLimitOptions {
  * forwarding aggregated results to a delegate StreamingLimit. This reduces
  * noise from individual samples and ensures the delegate only sees
  * representative data.
+ *
+ * **Important:** Because a window aggregates samples across many requests,
+ * the `operationName` received in each `addSample` call is intentionally
+ * **not** forwarded to the delegate. This means `WindowedLimit` is
+ * incompatible with delegates that rely on per-sample operation names
+ * (e.g. `GroupAwareLimit`). Wrapping a `GroupAwareLimit` in a
+ * `WindowedLimit` will silently disable all group-aware behavior.
  */
 export class WindowedLimit implements AdaptiveLimit {
   private readonly delegate: AdaptiveLimit;
@@ -62,8 +69,10 @@ export class WindowedLimit implements AdaptiveLimit {
     this.minWindowTime = options.minWindowTimeMs ?? DEFAULT_MIN_WINDOW_TIME;
     this.maxWindowTime = options.maxWindowTimeMs ?? DEFAULT_MAX_WINDOW_TIME;
     this.windowSize = options.windowSize ?? DEFAULT_WINDOW_SIZE;
-    this.minRttThreshold = options.minRttThresholdMs ?? DEFAULT_MIN_RTT_THRESHOLD;
-    this.sampleWindowFactory = options.sampleWindowFactory ?? makeAverageSampleWindow;
+    this.minRttThreshold =
+      options.minRttThresholdMs ?? DEFAULT_MIN_RTT_THRESHOLD;
+    this.sampleWindowFactory =
+      options.sampleWindowFactory ?? makeAverageSampleWindow;
 
     if (this.minWindowTime < 100) {
       throw new Error("minWindowTime must be >= 100 ms");
@@ -78,7 +87,13 @@ export class WindowedLimit implements AdaptiveLimit {
     this.sample = this.sampleWindowFactory();
   }
 
-  addSample(startTime: number, rtt: number, inflight: number, didDrop: boolean): void {
+  addSample(
+    startTime: number,
+    rtt: number,
+    inflight: number,
+    didDrop: boolean,
+    operationName?: string,
+  ): void {
     const endTime = startTime + rtt;
 
     if (rtt < this.minRttThreshold) {
@@ -100,8 +115,12 @@ export class WindowedLimit implements AdaptiveLimit {
         this.maxWindowTime,
       );
 
-    const isWindowReady = current.candidateRttMs < Infinity && current.sampleCount >= this.windowSize
+    const isWindowReady =
+      current.candidateRttMs < Infinity &&
+      current.sampleCount >= this.windowSize;
 
+    // The window has a mix of operations, so we can't provide a single
+    // operation name to the delegate.
     if (isWindowReady) {
       this.delegate.addSample(
         startTime,

@@ -143,6 +143,13 @@ export interface LimiterOptions<ContextT> {
    * request. When omitted, rejected requests immediately receive `undefined`.
    */
   allotmentUnavailableStrategy?: AllotmentUnavailableStrategy<ContextT>;
+
+  /**
+   * Derives an operation name from the request context, passed to the limit
+   * algorithm's `addSample` so group-aware limits can distinguish
+   * heterogeneous workloads. When omitted, no operation name is provided.
+   */
+  operationNameFor?: (context: ContextT) => string | undefined;
 }
 
 /**
@@ -162,6 +169,9 @@ export class Limiter<Context = void> {
     | undefined;
 
   private readonly bypassResolver: ((context: Context) => boolean) | undefined;
+  private readonly operationNameFor:
+    | ((context: Context) => string | undefined)
+    | undefined;
   private readonly acquireBypassedAllotment: LimitAllotment;
 
   private readonly successCounter: Counter;
@@ -185,6 +195,7 @@ export class Limiter<Context = void> {
     this.limitAlgorithm = options.limit ?? Limiter.makeDefaultLimit();
     this._limit = this.limitAlgorithm.currentLimit;
     this.bypassResolver = options.bypassResolver;
+    this.operationNameFor = options.operationNameFor;
 
     this.acquireStrategy =
       options.acquireStrategy ?? new SemaphoreStrategy(this._limit);
@@ -341,6 +352,7 @@ export class Limiter<Context = void> {
   private createAllotment(ctx: Context): LimitAllotment {
     const startTime = this.clock();
     const currentInflight = ++this._inflight;
+    const operationName = this.operationNameFor?.(ctx);
 
     // Make sure an allotment can only be released once; future calls become a
     // no-op. This simplifies a lot of cleanup handling etc that'd otherwise be
@@ -365,7 +377,7 @@ export class Limiter<Context = void> {
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false);
+          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false, operationName);
         } catch {}
         try {
           await this.rejectionStrategy?.onAllotmentReleased();
@@ -404,7 +416,7 @@ export class Limiter<Context = void> {
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true);
+          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true, operationName);
         } catch {}
         try {
           await this.rejectionStrategy?.onAllotmentReleased();

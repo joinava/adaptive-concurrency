@@ -161,6 +161,7 @@ export class GradientLimit implements AdaptiveLimit {
     rtt: number,
     inflight: number,
     _didDrop: boolean,
+    _operationName?: string,
   ): void {
     const newLimitNoFloor = this.computeNextLimitUnrounded(rtt, inflight);
 

@@ -23,6 +23,8 @@ export interface AdaptiveLimit {
    * @param rtt Round trip time in fractional milliseconds
    * @param inflight Number of inflight requests at the time the request started
    * @param didDrop Whether the request was dropped (timeout or rejection)
+   * @param operationName Optional name identifying the type of operation,
+   *   used by group-aware limits to distinguish heterogeneous workloads.
    */
-  addSample(startTime: number, rtt: number, inflight: number, didDrop: boolean): void;
+  addSample(startTime: number, rtt: number, inflight: number, didDrop: boolean, operationName?: string): void;
 }

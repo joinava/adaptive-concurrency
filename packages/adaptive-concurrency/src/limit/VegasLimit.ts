@@ -3,18 +3,7 @@ import type { DistributionMetric, MetricRegistry } from "../MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "../MetricRegistry.js";
 import type { AdaptiveLimit } from "./StreamingLimit.js";
 
-/**
- * Sublinear scale of the concurrency limit (floor of log10, lower-bounded for
- * small n). Same idea as Netflix's Log10RootIntFunction. Used only for
- * {@link VegasLimit} default policy.
- */
-const log10ScaleLookup: number[] = Array.from({ length: 1000 }, (_, i) =>
-  Math.max(1, Math.floor(Math.log10(i))),
-);
-
-function log10Scale(n: number): number {
-  return n < 1000 ? log10ScaleLookup[n]! : Math.floor(Math.log10(n));
-}
+import { log10Scale } from "../utils/index.js";
 
 /**
  * Limiter based on TCP Vegas where the limit increases by alpha if the
@@ -145,6 +134,7 @@ export class VegasLimit implements AdaptiveLimit {
     rtt: number,
     inflight: number,
     didDrop: boolean,
+    _operationName?: string,
   ): void {
     this.applyNewLimit(
       this.computeNextLimit(startTime, rtt, inflight, didDrop),
