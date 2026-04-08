@@ -114,6 +114,7 @@ export class GroupAwareLimit implements AdaptiveLimit {
   private readonly registry: MetricRegistry;
   private readonly congestionSignalGauge: Gauge;
   private readonly warmedGroupsCountGauge: Gauge;
+  private readonly groupRttRatioGauge: Gauge;
 
   constructor(options?: {
     initialLimit?: number;
@@ -149,6 +150,9 @@ export class GroupAwareLimit implements AdaptiveLimit {
     );
     this.warmedGroupsCountGauge = this.registry.gauge(
       MetricIds.WARMED_GROUPS_COUNT_NAME,
+    );
+    this.groupRttRatioGauge = this.registry.gauge(
+      MetricIds.GROUP_RTT_RATIO_NAME,
     );
   }
 
@@ -196,9 +200,7 @@ export class GroupAwareLimit implements AdaptiveLimit {
     this.warmedGroupsCountGauge.record(warmedGroupInfos.length);
     this.congestionSignalGauge.record(signal);
     for (const { groupName: group, ratio } of warmedGroupInfos) {
-      this.registry
-        .gauge(MetricIds.GROUP_RTT_RATIO_NAME, { group })
-        .record(ratio);
+      this.groupRttRatioGauge.record(ratio, { group });
     }
 
     if (signal > this.beta) {

@@ -252,13 +252,13 @@ export class Limiter<Context = void> {
 
     this.acquireBypassedAllotment = {
       releaseAndRecordSuccess: async () => {
-        this.successCounter.increment();
+        this.successCounter.add(1);
       },
       releaseAndIgnore: async () => {
-        this.ignoredCounter.increment();
+        this.ignoredCounter.add(1);
       },
       releaseAndRecordDropped: async () => {
-        this.droppedCounter.increment();
+        this.droppedCounter.add(1);
       },
     };
 
@@ -271,7 +271,7 @@ export class Limiter<Context = void> {
     const ctx = (options?.context ?? undefined) as Context;
 
     if (this.bypassResolver?.(ctx)) {
-      this.acquireBypassedCounter.increment();
+      this.acquireBypassedCounter.add(1);
       return this.acquireBypassedAllotment;
     }
 
@@ -283,7 +283,7 @@ export class Limiter<Context = void> {
     };
 
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
-      this.acquireFailedCounter.increment();
+      this.acquireFailedCounter.add(1);
       if (!this.rejectionStrategy) {
         this.acquireTimeOnUnavailableDistribution.addSample(
           this.clock() - acquireStart,
@@ -317,7 +317,7 @@ export class Limiter<Context = void> {
       return result;
     }
 
-    this.acquireSucceededCounter.increment();
+    this.acquireSucceededCounter.add(1);
     const allotment = this.createAllotment(ctx);
 
     // Record the acquire time as a success, since we did actually succeed even
@@ -341,11 +341,11 @@ export class Limiter<Context = void> {
       inflight: this._inflight,
     };
     if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
-      this.acquireFailedCounter.increment();
+      this.acquireFailedCounter.add(1);
       return undefined;
     }
 
-    this.acquireSucceededCounter.increment();
+    this.acquireSucceededCounter.add(1);
     return this.createAllotment(ctx);
   }
 
@@ -353,6 +353,9 @@ export class Limiter<Context = void> {
     const startTime = this.clock();
     const currentInflight = ++this._inflight;
     const operationName = this.operationNameFor?.(ctx);
+    const incrementTags = operationName
+      ? { [MetricIds.OPERATION_NAME_TAG]: operationName }
+      : {};
 
     // Make sure an allotment can only be released once; future calls become a
     // no-op. This simplifies a lot of cleanup handling etc that'd otherwise be
@@ -368,7 +371,7 @@ export class Limiter<Context = void> {
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
-        this.successCounter.increment();
+        this.successCounter.add(1, incrementTags);
 
         // If one onAllotmentReleased call fails, hard to know what to do here.
         // We're in some kind of inconsistent state, but we probably have to
@@ -377,7 +380,13 @@ export class Limiter<Context = void> {
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, false, operationName);
+          this.limitAlgorithm.addSample(
+            startTime,
+            rtt,
+            currentInflight,
+            false,
+            operationName,
+          );
         } catch {}
         try {
           await this.rejectionStrategy?.onAllotmentReleased();
@@ -388,7 +397,7 @@ export class Limiter<Context = void> {
         releaseStarted = true;
 
         this._inflight--;
-        this.ignoredCounter.increment();
+        this.ignoredCounter.add(1, incrementTags);
 
         // If one onAllotmentReleased call fails, hard to know what to do here.
         // We're in some kind of inconsistent state, but we probably have to
@@ -407,7 +416,7 @@ export class Limiter<Context = void> {
         const endTime = this.clock();
         const rtt = endTime - startTime;
         this._inflight--;
-        this.droppedCounter.increment();
+        this.droppedCounter.add(1, incrementTags);
 
         // If one onAllotmentReleased call fails, hard to know what to do here.
         // We're in some kind of inconsistent state, but we probably have to
@@ -416,7 +425,13 @@ export class Limiter<Context = void> {
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          this.limitAlgorithm.addSample(startTime, rtt, currentInflight, true, operationName);
+          this.limitAlgorithm.addSample(
+            startTime,
+            rtt,
+            currentInflight,
+            true,
+            operationName,
+          );
         } catch {}
         try {
           await this.rejectionStrategy?.onAllotmentReleased();

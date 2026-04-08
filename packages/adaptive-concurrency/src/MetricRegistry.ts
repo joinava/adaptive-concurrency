@@ -7,6 +7,7 @@
  * failures from retry attempts.
  */
 export const MetricIds = {
+  OPERATION_NAME_TAG: "operation",
   LIMIT_NAME: "limit",
   CALL_NAME: "call",
   ACQUIRE_ATTEMPT_NAME: "acquire_attempt",
@@ -33,12 +34,12 @@ export interface DistributionMetric {
  * translate into an actions-per-second metric.
  */
 export interface Counter {
-  increment(): void;
+  add(value: number, attributes?: Record<string, string>): void;
 }
 
 /** Opaque handle for a registered gauge (supplier is polled by the registry on flush). */
 export interface Gauge {
-  record(value: number): void;
+  record(value: number, attributes?: Record<string, string>): void;
 }
 
 /**
@@ -80,7 +81,7 @@ export interface MetricRegistry {
 }
 
 const NOOP_SAMPLE_LISTENER: DistributionMetric = { addSample() {} };
-const NOOP_COUNTER: Counter = { increment() {} };
+const NOOP_COUNTER: Counter = { add() {} };
 const NOOP_GAUGE: Gauge = { record() {} };
 
 /**
