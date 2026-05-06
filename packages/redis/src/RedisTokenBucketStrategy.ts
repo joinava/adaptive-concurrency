@@ -190,7 +190,7 @@ export class RedisTokenBucketStrategy<ContextT> {
     info: ReservationErrorInfo<ContextT>,
   ): Promise<void> {
     try {
-      // wait incase the callback is async
+      // wait in case the callback is async
       await this.#onReservationError?.(info);
     } catch {
       // Swallowed deliberately.
