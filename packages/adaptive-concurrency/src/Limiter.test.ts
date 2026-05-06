@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { AllotmentReservation } from "./AllotmentReservation.js";
 import { AIMDLimit } from "./limit/AIMDLimit.js";
 import { FixedLimit } from "./limit/FixedLimit.js";
 import { SettableLimit } from "./limit/SettableLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
-import { AllotmentReservation } from "./AllotmentReservation.js";
 import type {
   AcquireStrategy,
   AllotmentUnavailableStrategy,
 } from "./Limiter.js";
 import { Limiter } from "./Limiter.js";
+import {
+  BlockingBacklogRejection,
+  MAX_TIMEOUT,
+  type BlockingBacklogRejectionOptions,
+} from "./limiter/allocation-unavailable-strategies/BlockingBacklogRejection.js";
 import type {
   Counter,
   DistributionMetric,
@@ -17,17 +22,8 @@ import type {
   MetricRegistry,
 } from "./MetricRegistry.js";
 import { MetricIds } from "./MetricRegistry.js";
+import { AdaptiveTimeoutError, isAdaptiveTimeoutError } from "./RunResult.js";
 import { LinkedWaiterQueue } from "./utils/LinkedWaiterQueue.js";
-import {
-  BlockingBacklogRejection,
-  MAX_TIMEOUT,
-  type BlockingBacklogRejectionOptions,
-} from "./limiter/allocation-unavailable-strategies/BlockingBacklogRejection.js";
-import {
-  AdaptiveTimeoutError,
-  isAdaptiveTimeoutError,
-} from "./RunResult.js";
-
 
 type BlockingOptions<ContextT> = Partial<
   Pick<
@@ -1244,83 +1240,83 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     // behave the same way so accidental double-release in user `finally`
     // blocks doesn't double-count metrics.
     it("is one-shot: double-release does not double-count metrics", async () => {
-        const events: Array<{ id: string; status: string; delta: number }> = [];
-        const limiter = new Limiter<string>({
-          limit: new FixedLimit(0),
-          bypassResolver: () => true,
-          metricRegistry: makeRecordingMetricRegistry(events),
-        });
-
-        const a = await limiter.acquire({ context: "x" });
-        assert.ok(a);
-        await a.releaseAndRecordSuccess();
-        await a.releaseAndRecordSuccess();
-        await a.releaseAndIgnore();
-
-        const successCount = events.filter(
-          (e) => e.id === MetricIds.CALL_NAME && e.status === "success",
-        ).length;
-        const ignoredCount = events.filter(
-          (e) => e.id === MetricIds.CALL_NAME && e.status === "ignored",
-        ).length;
-        assert.equal(
-          successCount,
-          1,
-          "second releaseAndRecordSuccess should be a no-op",
-        );
-        assert.equal(
-          ignoredCount,
-          0,
-          "subsequent releaseAndIgnore on already-released allotment should be a no-op",
-        );
+      const events: Array<{ id: string; status: string; delta: number }> = [];
+      const limiter = new Limiter<string>({
+        limit: new FixedLimit(0),
+        bypassResolver: () => true,
+        metricRegistry: makeRecordingMetricRegistry(events),
       });
+
+      const a = await limiter.acquire({ context: "x" });
+      assert.ok(a);
+      await a.releaseAndRecordSuccess();
+      await a.releaseAndRecordSuccess();
+      await a.releaseAndIgnore();
+
+      const successCount = events.filter(
+        (e) => e.id === MetricIds.CALL_NAME && e.status === "success",
+      ).length;
+      const ignoredCount = events.filter(
+        (e) => e.id === MetricIds.CALL_NAME && e.status === "ignored",
+      ).length;
+      assert.equal(
+        successCount,
+        1,
+        "second releaseAndRecordSuccess should be a no-op",
+      );
+      assert.equal(
+        ignoredCount,
+        0,
+        "subsequent releaseAndIgnore on already-released allotment should be a no-op",
+      );
+    });
 
     // Non-bypassed allotments tag their CALL_NAME counters with the
     // operation name (via `operationNameFor`). Bypassed allotments must
     // do the same so per-operation dashboards include bypassed traffic.
     it("tags success/ignored/dropped counters with operationNameFor when bypassing", async () => {
-        const events: Array<{
-          id: string;
-          status: string;
-          tags: Record<string, string>;
-        }> = [];
-        const recording: MetricRegistry = {
-          counter(id, attrs) {
-            return {
-              add(_n, addTags) {
-                events.push({
-                  id,
-                  status: attrs?.status ?? "",
-                  tags: { ...(attrs ?? {}), ...(addTags ?? {}) },
-                });
-              },
-            };
-          },
-          gauge: () => ({ record() {} }),
-          distribution: () => ({ addSample() {} }),
-        };
+      const events: Array<{
+        id: string;
+        status: string;
+        tags: Record<string, string>;
+      }> = [];
+      const recording: MetricRegistry = {
+        counter(id, attrs) {
+          return {
+            add(_n, addTags) {
+              events.push({
+                id,
+                status: attrs?.status ?? "",
+                tags: { ...(attrs ?? {}), ...(addTags ?? {}) },
+              });
+            },
+          };
+        },
+        gauge: () => ({ record() {} }),
+        distribution: () => ({ addSample() {} }),
+      };
 
-        const limiter = new Limiter<string>({
-          limit: new FixedLimit(0),
-          bypassResolver: () => true,
-          operationNameFor: (ctx) => ctx,
-          metricRegistry: recording,
-        });
-
-        const a = await limiter.acquire({ context: "list-things" });
-        assert.ok(a);
-        await a.releaseAndRecordSuccess();
-
-        const successEvent = events.find(
-          (e) => e.id === MetricIds.CALL_NAME && e.status === "success",
-        );
-        assert.ok(successEvent);
-        assert.equal(
-          successEvent.tags[MetricIds.OPERATION_NAME_TAG],
-          "list-things",
-          "bypassed success should carry the operation tag",
-        );
+      const limiter = new Limiter<string>({
+        limit: new FixedLimit(0),
+        bypassResolver: () => true,
+        operationNameFor: (ctx) => ctx,
+        metricRegistry: recording,
       });
+
+      const a = await limiter.acquire({ context: "list-things" });
+      assert.ok(a);
+      await a.releaseAndRecordSuccess();
+
+      const successEvent = events.find(
+        (e) => e.id === MetricIds.CALL_NAME && e.status === "success",
+      );
+      assert.ok(successEvent);
+      assert.equal(
+        successEvent.tags[MetricIds.OPERATION_NAME_TAG],
+        "list-things",
+        "bypassed success should carry the operation tag",
+      );
+    });
   });
 
   describe("release-path resilience to user-supplied throws", () => {
@@ -1438,10 +1434,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
       armed = true;
       calls = 0;
-      await assert.rejects(
-        () => limiter.acquire({}),
-        /monotonic clock failed/,
-      );
+      await assert.rejects(() => limiter.acquire({}), /monotonic clock failed/);
       armed = false;
 
       const next = await limiter.acquire({});
@@ -1487,7 +1480,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         counter(_id, attrs) {
           return {
             add() {
-      if (throwOnAcquireSucceed && attrs?.status === "succeeded") {
+              if (throwOnAcquireSucceed && attrs?.status === "succeeded") {
                 throw new Error("counter unavailable");
               }
             },

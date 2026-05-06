@@ -165,7 +165,7 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 - Factory helpers (`makePartitionedLimiter`, `makePartitionedBlockingLimiter`, `makePartitionedLifoBlockingLimiter`) add a convenience `delayMs` field per partition (`PartitionConfig & { delayMs?: number }`) and wire it to `DelayedRejectStrategy`.
 - Java's `maxDelayedThreads` maps to **`DelayedRejectStrategy`**'s `maxConcurrentDelays` (default 100).
 - `PartitionedStrategy` requires `initialLimit`.
-- `PartitionedStrategy` itself throws if no partitions are provided; `HttpLimiterBuilder` falls back to non-partitioned `Limiter` when no partitions are configured.
+- `PartitionedStrategy` itself throws if no partitions are provided.
 - `PartitionedStrategy` tracks reserved and committed inflight counts separately. Reservations count against admission, but partition inflight distribution metrics are emitted only on commit so cancelled reservations do not leave metric noise.
 
 ### Redis token bucket strategy
@@ -353,18 +353,8 @@ Implementation mapping:
 | Java                            | TypeScript                                               |
 | ------------------------------- | -------------------------------------------------------- |
 | `ConcurrencyLimitServletFilter` | `concurrencyLimitMiddleware(...)`                        |
-| `ServletLimiterBuilder`         | `HttpLimiterBuilder`                                     |
 | servlet request model           | minimal `HttpRequest` shape (`method`, `url`, `headers`) |
 | HTTP 429 overload responses     | default 429 (`throttleStatus` configurable)              |
-
-`HttpLimiterBuilder` supports:
-
-- partitioning by header
-- partitioning by path mapping function
-- partitioning by method
-- bypass by header/method/custom predicate
-
-If several `partitionBy*` methods are used, `build()` merges them **in registration order** into a **single** `partitionResolver` (first non-null/undefined name wins) before constructing `PartitionedStrategy`—the strategy itself always takes one resolver function; ordered fallback is either composed here or implemented manually when constructing `PartitionedStrategy` directly.
 
 Java servlet helpers without direct built-in equivalents (e.g. parameter/attribute/principal-specific builders) should be implemented via custom resolver/predicate logic in TS.
 
@@ -415,7 +405,7 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 5. Replace builder/decorator constructions with `new Limiter({...})` plus strategies.
 6. When implementing a custom acquire strategy, implement the two-phase `tryReserveAllotment()` contract and resolve each returned `AllotmentReservation` exactly once via `commit()` or `cancel()`.
 7. Replace `BlockingLimiter`/`LifoBlockingLimiter` wrapping with `allotmentUnavailableStrategy` strategies.
-8. For partitioned limiting, pass a single `partitionResolver` in the `PartitionedStrategy` constructor options (compose multiple Java-style resolvers yourself, or use `HttpLimiterBuilder`, which does this at `build()`).
+8. For partitioned limiting, pass a single `partitionResolver` in the `PartitionedStrategy` constructor options; compose multiple Java-style resolvers yourself.
 9. If you need stricter partition bursting than Java defaults, configure TS `PartitionConfig.burstMode` (`unbounded`/`capped`/`none`).
 10. If using TS partitioned factory helpers and Java-style reject delays, set per-partition `delayMs` (factory convenience) or wire your own `DelayedRejectStrategy`.
 11. Prefer `withLimiter(limiter)` for scoped acquire/complete flows where appropriate.

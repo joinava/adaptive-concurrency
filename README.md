@@ -237,13 +237,13 @@ pnpm add adaptive-concurrency @adaptive-concurrency/redis
 ```
 
 ```typescript
-import { Limiter, SemaphoreStrategy, SettableLimit } from "adaptive-concurrency";
+import { FixedLimit, Limiter, SemaphoreStrategy } from "adaptive-concurrency";
 import {
   RedisTokenBucket,
   RedisTokenBucketStrategy,
 } from "@adaptive-concurrency/redis";
 
-const limit = new SettableLimit(50);
+const localConcurrency = 50;
 const bucket = new RedisTokenBucket(redisClient, {
   keyPrefix: "my-service:rate-limit",
   maxTokens: 1_000,
@@ -251,10 +251,10 @@ const bucket = new RedisTokenBucket(redisClient, {
 });
 
 const limiter = new Limiter<{ tenant: string }>({
-  limit,
+  limit: new FixedLimit(localConcurrency),
   acquireStrategy: new RedisTokenBucketStrategy({
     bucket,
-    inner: new SemaphoreStrategy(limit.currentLimit),
+    inner: new SemaphoreStrategy(localConcurrency),
     keyResolver: (ctx) => ctx.tenant,
   }),
 });

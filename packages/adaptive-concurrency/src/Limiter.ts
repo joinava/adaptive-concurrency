@@ -340,19 +340,20 @@ export class Limiter<
 
     const acquireStart = this.clock();
     const allotment = await this.tryAcquireCore(ctx, acquireStart);
-    const recordAcquireFailed = () => {
+
+    // Called when this method is retunring undefined; not called for each
+    // individual acquire attempt that may be triggered by the rejection
+    // strategy.
+    const recordFinalAcquireFailed = () => {
       void fireAndForget(() => {
         const now = this.clock();
         this.acquireTimeOnUnavailableDistribution.addSample(now - acquireStart);
-      });
-      void fireAndForget(() => {
-        this.acquireFailedCounter.add(1);
       });
     };
 
     if (!allotment) {
       if (!this.rejectionStrategy) {
-        void recordAcquireFailed();
+        void recordFinalAcquireFailed();
         return undefined;
       }
 
@@ -376,7 +377,7 @@ export class Limiter<
 
       // If we still don't have an allotment, record the acquire time as unavailable.
       if (!result) {
-        void recordAcquireFailed();
+        void recordFinalAcquireFailed();
         return undefined;
       }
 
@@ -409,7 +410,9 @@ export class Limiter<
     });
 
     if (!reservation) {
-      this.acquireFailedCounter.add(1);
+      void fireAndForget(() => {
+        this.acquireFailedCounter.add(1);
+      });
       return undefined;
     }
 
