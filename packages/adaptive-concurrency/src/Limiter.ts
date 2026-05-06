@@ -340,11 +340,19 @@ export class Limiter<
 
     const acquireStart = this.clock();
     const allotment = await this.tryAcquireCore(ctx, acquireStart);
+    const recordAcquireFailed = () => {
+      void fireAndForget(() => {
+        const now = this.clock();
+        this.acquireTimeOnUnavailableDistribution.addSample(now - acquireStart);
+      });
+      void fireAndForget(() => {
+        this.acquireFailedCounter.add(1);
+      });
+    };
 
     if (!allotment) {
       if (!this.rejectionStrategy) {
-        const now = this.clock();
-        this.acquireTimeOnUnavailableDistribution.addSample(now - acquireStart);
+        void recordAcquireFailed();
         return undefined;
       }
 
@@ -368,8 +376,7 @@ export class Limiter<
 
       // If we still don't have an allotment, record the acquire time as unavailable.
       if (!result) {
-        const now = this.clock();
-        this.acquireTimeOnUnavailableDistribution.addSample(now - acquireStart);
+        void recordAcquireFailed();
         return undefined;
       }
 
@@ -424,6 +431,13 @@ export class Limiter<
       throw err;
     }
 
+    // Commit only after the throwable user-supplied work above has succeeded.
+    // If `commit()` itself throws, the reservation is in an indeterminate state
+    // per the AllotmentReservation contract; we propagate the error without
+    // touching `_inflight` or building an allotment, leaving the strategy
+    // responsible for its own cleanup.
+    await reservation.commit();
+
     void fireAndForget(() => this.acquireSucceededCounter.add(1));
     void fireAndForget(() => {
       if (operationStartTime !== undefined) {
@@ -432,13 +446,6 @@ export class Limiter<
         );
       }
     });
-
-    // Commit only after the throwable user-supplied work above has succeeded.
-    // If `commit()` itself throws, the reservation is in an indeterminate state
-    // per the AllotmentReservation contract; we propagate the error without
-    // touching `_inflight` or building an allotment, leaving the strategy
-    // responsible for its own cleanup.
-    await reservation.commit();
 
     const currentInflight = ++this._inflight;
     const incrementTags = operationName
