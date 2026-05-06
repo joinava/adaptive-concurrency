@@ -93,6 +93,20 @@ export interface Gradient2LimitOptions {
    */
   longWindow?: number;
 
+  /**
+   * Configuration for the limiter's recovery probe when the limit reaches 0.
+   * See {@link AdaptiveLimit.probeFromZeroInterval}.
+   */
+  recoveryProbe?: {
+    /**
+     * Fallback base interval in milliseconds between probes, used when the
+     * algorithm has no usable RTT estimate (e.g. before any sample has been
+     * recorded). When an RTT estimate is available the probe interval is
+     * derived from `longRtt * 5`. Default: 1000.
+     */
+    baseMs?: number;
+  };
+
   metricRegistry?: MetricRegistry;
 }
 
@@ -123,6 +137,7 @@ export class GradientLimit implements AdaptiveLimit {
   private readonly queueSize: (concurrency: number) => number;
   private readonly smoothing: number;
   private readonly tolerance: number;
+  private readonly recoveryProbeBaseMs: number;
 
   private readonly longRttSampleListener: DistributionMetric;
   private readonly shortRttSampleListener: DistributionMetric;
@@ -138,9 +153,13 @@ export class GradientLimit implements AdaptiveLimit {
     this.smoothing = options.smoothing ?? 0.2;
     this.tolerance = options.rttTolerance ?? 1.5;
     this.longRtt = new ExpMovingAverage(options.longWindow ?? 600, 10);
+    this.recoveryProbeBaseMs = options.recoveryProbe?.baseMs ?? 1000;
 
     if (options.rttTolerance !== undefined && options.rttTolerance < 1.0) {
-      throw new Error("Tolerance must be >= 1.0");
+      throw new RangeError("Tolerance must be >= 1.0");
+    }
+    if (this.recoveryProbeBaseMs <= 0) {
+      throw new RangeError("recoveryProbe.baseMs must be > 0");
     }
 
     const qs = options.queueSize ?? 4;
@@ -169,6 +188,17 @@ export class GradientLimit implements AdaptiveLimit {
 
     const newLimit = Math.floor(newLimitNoFloor);
     this.applyNewLimit(newLimit);
+  }
+
+  probeFromZeroInterval(failedProbes: number): number {
+    const longRtt = this.longRtt.currentValue;
+    const base = longRtt > 0 ? longRtt * 5 : this.recoveryProbeBaseMs;
+    return base * Math.pow(2, failedProbes);
+  }
+
+  applyProbeFromZero(): void {
+    this.estimatedLimit = 1;
+    this.applyNewLimit(1);
   }
 
   get currentLimit(): number {

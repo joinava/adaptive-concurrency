@@ -1,3 +1,4 @@
+import { sumBy } from "es-toolkit";
 import lruPkg from "lru_map";
 const { LRUMap } = lruPkg;
 
@@ -110,6 +111,7 @@ export class GroupAwareLimit implements AdaptiveLimit {
   private readonly recentRttWindow: number;
   private readonly minGroupSamples: number;
   private readonly clock: () => number;
+  private readonly recoveryProbeBaseMs: number;
 
   private readonly registry: MetricRegistry;
   private readonly congestionSignalGauge: Gauge;
@@ -130,6 +132,19 @@ export class GroupAwareLimit implements AdaptiveLimit {
     minGroupSamples?: number;
     clock?: () => number;
     metricRegistry?: MetricRegistry;
+    /**
+     * Configuration for the limiter's recovery probe when the limit reaches
+     * 0. See {@link AdaptiveLimit.probeFromZeroInterval}.
+     */
+    recoveryProbe?: {
+      /**
+       * Fallback base interval in milliseconds between probes, used when no
+       * group is warmed up enough to provide a recent RTT estimate. When
+       * warmed groups are available, the probe interval is derived from
+       * their weighted-mean recent RTT × 5. Default: 1000.
+       */
+      baseMs?: number;
+    };
   }) {
     this.minLimit = options?.minLimit ?? 10;
     this.maxLimit = options?.maxLimit ?? 200;
@@ -143,6 +158,10 @@ export class GroupAwareLimit implements AdaptiveLimit {
     this.recentRttWindow = options?.recentRttWindow ?? 100;
     this.minGroupSamples = options?.minGroupSamples ?? 20;
     this.clock = options?.clock ?? (() => performance.now());
+    this.recoveryProbeBaseMs = options?.recoveryProbe?.baseMs ?? 1000;
+    if (this.recoveryProbeBaseMs <= 0) {
+      throw new RangeError("recoveryProbe.baseMs must be > 0");
+    }
 
     this.registry = options?.metricRegistry ?? NoopMetricRegistry;
     this.congestionSignalGauge = this.registry.gauge(
@@ -214,6 +233,43 @@ export class GroupAwareLimit implements AdaptiveLimit {
     return this._limit;
   }
 
+  probeFromZeroInterval(failedProbes: number): number {
+    const now = this.clock();
+    const entries = [
+      ...(this.groups.entries() satisfies Iterator<
+        [string, GroupState]
+      > as unknown as Iterable<[string, GroupState]>),
+    ];
+
+    const warmedGroupInfos = entries.flatMap(([, groupState]) => {
+      const activity = groupState.activityCount(now);
+
+      const recentRtt = groupState.recentRtt.currentValue;
+      const validRecentRtt = Number.isFinite(recentRtt) && recentRtt > 0;
+
+      return validRecentRtt && activity >= this.minGroupSamples
+        ? [{ recentRtt, weight: Math.sqrt(activity) }]
+        : [];
+    });
+
+    const totalWeight = sumBy(warmedGroupInfos, ({ weight }) => weight);
+    const weightedRatioSum = sumBy(
+      warmedGroupInfos,
+      ({ weight, recentRtt }) => weight * recentRtt,
+    );
+
+    const base =
+      totalWeight > 0
+        ? (weightedRatioSum / totalWeight) * 5
+        : this.recoveryProbeBaseMs;
+
+    return base * Math.pow(2, failedProbes);
+  }
+
+  applyProbeFromZero(): void {
+    this.applyNewLimit(1);
+  }
+
   subscribe(
     consumer: (newLimit: number) => void,
     options: { signal?: AbortSignal } = {},
@@ -257,8 +313,9 @@ export class GroupAwareLimit implements AdaptiveLimit {
 
     if (totalWeight <= 0) return undefined;
 
-    const weightedRatioSum = sum(
-      warmedGroupInfos.map(({ weight, ratio }) => weight * ratio),
+    const weightedRatioSum = sumBy(
+      warmedGroupInfos,
+      ({ weight, ratio }) => weight * ratio,
     );
 
     return {

@@ -5,28 +5,64 @@ import { GroupAwareLimit } from "./GroupAwareLimit.js";
 import { VegasLimit } from "./VegasLimit.js";
 
 function spyRegistry() {
-  const distributions = new Map<string, { samples: number[]; attrs?: Record<string, string> }>();
-  const gauges = new Map<string, { values: number[]; attrs?: Record<string, string> }>();
-  const counters = new Map<string, { count: number; attrs?: Record<string, string> }>();
+  const distributions = new Map<
+    string,
+    { samples: number[]; attrs?: Record<string, string> }
+  >();
+  const gauges = new Map<
+    string,
+    { values: number[]; attrs?: Record<string, string> }
+  >();
+  const counters = new Map<
+    string,
+    { count: number; attrs?: Record<string, string> }
+  >();
+
+  // Compose registration-time and per-call attributes when bucketing, so each
+  // unique tag combination ends up in its own series — mirroring how a real
+  // dimensional-metrics registry (OpenTelemetry, Prometheus, etc.) demuxes.
+  // Buckets are created lazily on first record to keep empty series out of
+  // the maps.
+  function bucketKey(
+    id: string,
+    regAttrs: Record<string, string> | undefined,
+    recordAttrs: Record<string, string> | undefined,
+  ): { key: string; merged: Record<string, string> | undefined } {
+    const merged = { ...(regAttrs ?? {}), ...(recordAttrs ?? {}) };
+    if (Object.keys(merged).length === 0) {
+      return { key: id, merged: undefined };
+    }
+    return { key: `${id}:${JSON.stringify(merged)}`, merged };
+  }
 
   const registry: MetricRegistry = {
-    distribution(id, attrs) {
-      const key = attrs ? `${id}:${JSON.stringify(attrs)}` : id;
-      if (!distributions.has(key)) distributions.set(key, { samples: [], attrs });
-      const entry = distributions.get(key)!;
-      return { addSample(v: number) { entry.samples.push(v); } };
+    distribution(id, regAttrs) {
+      return {
+        addSample(v: number) {
+          const { key, merged } = bucketKey(id, regAttrs, undefined);
+          if (!distributions.has(key))
+            distributions.set(key, { samples: [], attrs: merged });
+          distributions.get(key)!.samples.push(v);
+        },
+      };
     },
-    gauge(id, attrs) {
-      const key = attrs ? `${id}:${JSON.stringify(attrs)}` : id;
-      if (!gauges.has(key)) gauges.set(key, { values: [], attrs });
-      const entry = gauges.get(key)!;
-      return { record(v: number) { entry.values.push(v); } };
+    gauge(id, regAttrs) {
+      return {
+        record(v: number, recordAttrs?: Record<string, string>) {
+          const { key, merged } = bucketKey(id, regAttrs, recordAttrs);
+          if (!gauges.has(key)) gauges.set(key, { values: [], attrs: merged });
+          gauges.get(key)!.values.push(v);
+        },
+      };
     },
-    counter(id, attrs) {
-      const key = attrs ? `${id}:${JSON.stringify(attrs)}` : id;
-      if (!counters.has(key)) counters.set(key, { count: 0, attrs });
-      const entry = counters.get(key)!;
-      return { increment() { entry.count++; } };
+    counter(id, regAttrs) {
+      return {
+        add(value: number, recordAttrs?: Record<string, string>) {
+          const { key, merged } = bucketKey(id, regAttrs, recordAttrs);
+          if (!counters.has(key)) counters.set(key, { count: 0, attrs: merged });
+          counters.get(key)!.count += value;
+        },
+      };
     },
   };
 
@@ -85,7 +121,13 @@ describe("GroupAwareLimit", () => {
     });
 
     for (let i = 0; i < 100; i++) {
-      limit.addSample(i, 10, Math.floor(limit.currentLimit * 0.8), false, "reads");
+      limit.addSample(
+        i,
+        10,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "reads",
+      );
     }
 
     assert.ok(
@@ -138,14 +180,32 @@ describe("GroupAwareLimit", () => {
     });
 
     for (let i = 0; i < 300; i++) {
-      limit.addSample(i * 2, 5, Math.floor(limit.currentLimit * 0.8), false, "fast");
-      limit.addSample(i * 2 + 1, 50, Math.floor(limit.currentLimit * 0.8), false, "slow");
+      limit.addSample(
+        i * 2,
+        5,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "fast",
+      );
+      limit.addSample(
+        i * 2 + 1,
+        50,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "slow",
+      );
     }
 
     const limitAfterMixed = limit.currentLimit;
 
     for (let i = 0; i < 300; i++) {
-      limit.addSample(100000 + i, 50, Math.floor(limit.currentLimit * 0.8), false, "slow");
+      limit.addSample(
+        100000 + i,
+        50,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "slow",
+      );
     }
 
     const limitAfterShift = limit.currentLimit;
@@ -173,15 +233,39 @@ describe("GroupAwareLimit", () => {
     });
 
     for (let i = 0; i < 200; i++) {
-      limit.addSample(i * 2, 5, Math.floor(limit.currentLimit * 0.8), false, "fast");
-      limit.addSample(i * 2 + 1, 50, Math.floor(limit.currentLimit * 0.8), false, "slow");
+      limit.addSample(
+        i * 2,
+        5,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "fast",
+      );
+      limit.addSample(
+        i * 2 + 1,
+        50,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "slow",
+      );
     }
 
     const limitBefore = limit.currentLimit;
 
     for (let i = 0; i < 100; i++) {
-      limit.addSample(10000 + i * 2, 10, Math.floor(limit.currentLimit * 0.8), false, "fast");
-      limit.addSample(10000 + i * 2 + 1, 100, Math.floor(limit.currentLimit * 0.8), false, "slow");
+      limit.addSample(
+        10000 + i * 2,
+        10,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "fast",
+      );
+      limit.addSample(
+        10000 + i * 2 + 1,
+        100,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "slow",
+      );
     }
 
     assert.ok(
@@ -314,7 +398,13 @@ describe("GroupAwareLimit", () => {
     });
 
     for (let i = 0; i < 500; i++) {
-      limit.addSample(i, 10, Math.floor(limit.currentLimit * 0.8), false, "reads");
+      limit.addSample(
+        i,
+        10,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "reads",
+      );
     }
 
     assert.ok(
@@ -377,7 +467,13 @@ describe("GroupAwareLimit", () => {
     // limit should increase. If the 5000 ms RTT had leaked in, the signal
     // would be sky-high and the limit would decrease instead.
     for (let i = 0; i < 100; i++) {
-      limit.addSample(2000 + i, 10, Math.floor(limit.currentLimit * 0.8), false, "reads");
+      limit.addSample(
+        2000 + i,
+        10,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "reads",
+      );
     }
 
     assert.ok(
@@ -423,7 +519,11 @@ describe("GroupAwareLimit", () => {
 
     limit.addSample(0, 10, 50, true, "a");
 
-    assert.equal(limit.currentLimit, 50, "Custom decrease should subtract 50 on drop");
+    assert.equal(
+      limit.currentLimit,
+      50,
+      "Custom decrease should subtract 50 on drop",
+    );
   });
 
   // -----------------------------------------------------------------------
@@ -446,13 +546,31 @@ describe("GroupAwareLimit", () => {
       });
 
       for (let i = 0; i < 500; i++) {
-        limit.addSample(i * 2, FAST_RTT, Math.floor(limit.currentLimit * 0.8), false, "fast");
-        limit.addSample(i * 2 + 1, SLOW_RTT, Math.floor(limit.currentLimit * 0.8), false, "slow");
+        limit.addSample(
+          i * 2,
+          FAST_RTT,
+          Math.floor(limit.currentLimit * 0.8),
+          false,
+          "fast",
+        );
+        limit.addSample(
+          i * 2 + 1,
+          SLOW_RTT,
+          Math.floor(limit.currentLimit * 0.8),
+          false,
+          "slow",
+        );
       }
 
       let minLimit = limit.currentLimit;
       for (let i = 0; i < 200; i++) {
-        limit.addSample(100000 + i, SLOW_RTT, Math.floor(limit.currentLimit * 0.8), false, "slow");
+        limit.addSample(
+          100000 + i,
+          SLOW_RTT,
+          Math.floor(limit.currentLimit * 0.8),
+          false,
+          "slow",
+        );
         minLimit = Math.min(minLimit, limit.currentLimit);
       }
 
@@ -467,13 +585,28 @@ describe("GroupAwareLimit", () => {
       });
 
       for (let i = 0; i < 500; i++) {
-        limit.addSample(i * 2, FAST_RTT, Math.floor(limit.currentLimit * 0.8), false);
-        limit.addSample(i * 2 + 1, SLOW_RTT, Math.floor(limit.currentLimit * 0.8), false);
+        limit.addSample(
+          i * 2,
+          FAST_RTT,
+          Math.floor(limit.currentLimit * 0.8),
+          false,
+        );
+        limit.addSample(
+          i * 2 + 1,
+          SLOW_RTT,
+          Math.floor(limit.currentLimit * 0.8),
+          false,
+        );
       }
 
       let minLimit = limit.currentLimit;
       for (let i = 0; i < 200; i++) {
-        limit.addSample(100000 + i, SLOW_RTT, Math.floor(limit.currentLimit * 0.8), false);
+        limit.addSample(
+          100000 + i,
+          SLOW_RTT,
+          Math.floor(limit.currentLimit * 0.8),
+          false,
+        );
         minLimit = Math.min(minLimit, limit.currentLimit);
       }
 
@@ -518,7 +651,11 @@ describe("GroupAwareLimit", () => {
       limit.addSample(i, 10, 40, false);
     }
 
-    assert.equal(limit.currentLimit, 50, "Ungrouped samples should not trigger increase (no warmed-up groups)");
+    assert.equal(
+      limit.currentLimit,
+      50,
+      "Ungrouped samples should not trigger increase (no warmed-up groups)",
+    );
   });
 
   it("unnamed drops still decrease the limit", () => {
@@ -550,7 +687,13 @@ describe("GroupAwareLimit", () => {
 
     // Warm up a named group with healthy RTTs.
     for (let i = 0; i < 50; i++) {
-      limit.addSample(i, 10, Math.floor(limit.currentLimit * 0.8), false, "reads");
+      limit.addSample(
+        i,
+        10,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+        "reads",
+      );
     }
 
     const limitBefore = limit.currentLimit;
@@ -558,7 +701,12 @@ describe("GroupAwareLimit", () => {
     // Send unnamed samples with high inflight. The congestion signal from
     // the warmed-up "reads" group is healthy, so the limit should increase.
     for (let i = 0; i < 50; i++) {
-      limit.addSample(1000 + i, 10, Math.floor(limit.currentLimit * 0.8), false);
+      limit.addSample(
+        1000 + i,
+        10,
+        Math.floor(limit.currentLimit * 0.8),
+        false,
+      );
     }
 
     assert.ok(
@@ -656,13 +804,19 @@ describe("GroupAwareLimit", () => {
     const signal = gauges.get("congestion_signal");
     assert.ok(signal, "congestion_signal gauge should exist");
     assert.ok(signal.values.length > 0, "should have recorded signal values");
-    assert.ok(signal.values.every((s) => s > 0), "signal should be positive");
+    assert.ok(
+      signal.values.every((s) => s > 0),
+      "signal should be positive",
+    );
 
     const warmed = gauges.get("warmed_groups_count");
     assert.ok(warmed, "warmed_groups_count gauge should exist");
     const nonZero = warmed.values.filter((v) => v > 0);
     assert.ok(nonZero.length > 0, "should have recorded warmed groups > 0");
-    assert.ok(nonZero.every((v) => v === 1), "should be exactly 1 warmed group");
+    assert.ok(
+      nonZero.every((v) => v === 1),
+      "should be exactly 1 warmed group",
+    );
   });
 
   it("emits per-group RTT ratio tagged by group name", () => {
@@ -733,5 +887,68 @@ describe("GroupAwareLimit", () => {
       0,
       "drops should not emit congestion_signal values",
     );
+  });
+
+  // -----------------------------------------------------------------------
+  // Recovery probe
+  // -----------------------------------------------------------------------
+
+  describe("recovery probe", () => {
+    it("falls back to recoveryProbe.baseMs when no group is warmed", () => {
+      const limit = new GroupAwareLimit({
+        clock: () => 0,
+        recoveryProbe: { baseMs: 750 },
+      });
+      assert.equal(limit.probeFromZeroInterval(0), 750);
+      assert.equal(limit.probeFromZeroInterval(2), 3_000);
+    });
+
+    it("derives the base from weighted-mean recent RTT once groups are warm", () => {
+      let t = 0;
+      const limit = new GroupAwareLimit({
+        initialLimit: 50,
+        minGroupSamples: 5,
+        activityHalfLife: 600_000,
+        clock: () => t,
+      });
+
+      // Warm up two groups with very different recent RTTs (10 vs 50).
+      // Equal sample counts mean equal weights, so the weighted-mean recent
+      // RTT will be midway between them.
+      for (let i = 0; i < 30; i++) {
+        limit.addSample(i, 10, 40, false, "fast");
+        limit.addSample(i, 50, 40, false, "slow");
+      }
+
+      const interval = limit.probeFromZeroInterval(0);
+      // Expect 5 * mean(10, 50) = 150 ms
+      assert.ok(interval === 150, `expected ~150 ms, got ${interval}`);
+      assert.equal(
+        limit.probeFromZeroInterval(3),
+        limit.probeFromZeroInterval(0) * 8,
+      );
+    });
+
+    it("applyProbeFromZero raises the limit to 1 even when minLimit is 0", () => {
+      const limit = new GroupAwareLimit({
+        initialLimit: 0,
+        minLimit: 0,
+        clock: () => 0,
+      });
+      const seen: number[] = [];
+      limit.subscribe((n) => seen.push(n));
+
+      limit.applyProbeFromZero();
+
+      assert.equal(limit.currentLimit, 1);
+      assert.deepEqual(seen, [1]);
+    });
+
+    it("rejects non-positive recoveryProbe.baseMs", () => {
+      assert.throws(
+        () => new GroupAwareLimit({ recoveryProbe: { baseMs: 0 } }),
+        /recoveryProbe\.baseMs must be > 0/,
+      );
+    });
   });
 });

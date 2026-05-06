@@ -99,4 +99,58 @@ describe("Gradient2Limit", () => {
     const limit = new GradientLimit({ initialLimit: 25 });
     assert.ok(limit.toString().includes("Gradient2Limit"));
   });
+
+  describe("recovery probe", () => {
+    it("falls back to recoveryProbe.baseMs when no RTT has been observed", () => {
+      const limit = new GradientLimit({ recoveryProbe: { baseMs: 750 } });
+      assert.equal(limit.probeFromZeroInterval(0), 750);
+      assert.equal(limit.probeFromZeroInterval(2), 3_000);
+    });
+
+    it("derives the base from longRtt * 5 once samples have been observed", () => {
+      const limit = new GradientLimit({
+        initialLimit: 20,
+        minLimit: 1,
+        longWindow: 10,
+      });
+
+      // Feed enough samples that longRtt warms up to a stable positive value.
+      for (let i = 0; i < 50; i++) limit.addSample(0, 100, 20, false);
+
+      const interval = limit.probeFromZeroInterval(0);
+      assert.ok(interval > 0, "interval should be positive");
+      // longRtt should be near 100 after enough samples; allow some slack
+      // since EMA warmup is approximate.
+      assert.ok(
+        interval >= 5 * 50 && interval <= 5 * 200,
+        `expected ~5*longRtt, got ${interval}`,
+      );
+      assert.equal(
+        limit.probeFromZeroInterval(2),
+        limit.probeFromZeroInterval(0) * 4,
+      );
+    });
+
+    it("applyProbeFromZero raises the limit to 1 from a 0-state", () => {
+      const limit = new GradientLimit({
+        initialLimit: 0,
+        minLimit: 0,
+        queueSize: 0,
+      });
+      const seen: number[] = [];
+      limit.subscribe((n) => seen.push(n));
+
+      limit.applyProbeFromZero();
+
+      assert.equal(limit.currentLimit, 1);
+      assert.deepEqual(seen, [1]);
+    });
+
+    it("rejects non-positive recoveryProbe.baseMs", () => {
+      assert.throws(
+        () => new GradientLimit({ recoveryProbe: { baseMs: 0 } }),
+        /recoveryProbe\.baseMs must be > 0/,
+      );
+    });
+  });
 });

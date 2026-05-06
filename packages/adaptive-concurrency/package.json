@@ -9,7 +9,7 @@
     "dynamic rate limiting"
   ],
   "author": "Ethan Resnick <ethan.resnick@gmail.com>",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
   "exports": {
     ".": {
@@ -33,6 +33,7 @@
     "typescript": "^6.0.2"
   },
   "dependencies": {
+    "es-toolkit": "^1.46.1",
     "lru_map": "^0.4.1"
   }
 }

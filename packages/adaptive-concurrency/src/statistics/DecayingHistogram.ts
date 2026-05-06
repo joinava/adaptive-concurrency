@@ -42,10 +42,10 @@ export class DecayingHistogram {
       logWarning,
     } = options;
     if (halfLife <= 0) {
-      throw new Error("halfLife must be positive");
+      throw new RangeError("halfLife must be positive");
     }
     if (minValue <= 0 || maxValue <= minValue) {
-      throw new Error("Must have 0 < minValue < maxValue");
+      throw new RangeError("Must have 0 < minValue < maxValue");
     }
 
     this.lambda = Math.LN2 / halfLife;

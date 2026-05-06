@@ -127,7 +127,7 @@ export class PartitionedStrategy<
     }
 
     if (totalPercent > 1) {
-      throw new Error("Sum of partition percentages must be <= 1.0");
+      throw new RangeError("Sum of partition percentages must be <= 1.0");
     }
 
     this.partitionResolver = options.partitionResolver;
@@ -243,7 +243,9 @@ class Partition<PartitionName extends string = string> {
     registry: MetricRegistry;
   }) {
     if (init.percent < 0 || init.percent > 1) {
-      throw new Error("Partition percentage must be in the range [0.0, 1.0]");
+      throw new RangeError(
+        "Partition percentage must be in the range [0.0, 1.0]",
+      );
     }
     this.name = init.name;
     this.percent = init.percent;
@@ -254,7 +256,7 @@ class Partition<PartitionName extends string = string> {
       this.burstMode.kind === "capped" &&
       this.burstMode.maxBurstMultiplier < 1.0
     ) {
-      throw new Error("maxBurstMultiplier must be >= 1.0");
+      throw new RangeError("maxBurstMultiplier must be >= 1.0");
     }
 
     const registry = init.registry;
