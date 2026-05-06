@@ -158,7 +158,7 @@ export class GradientLimit implements AdaptiveLimit {
     if (options.rttTolerance !== undefined && options.rttTolerance < 1.0) {
       throw new RangeError("Tolerance must be >= 1.0");
     }
-    if (this.recoveryProbeBaseMs <= 0) {
+    if (!(this.recoveryProbeBaseMs > 0)) {
       throw new RangeError("recoveryProbe.baseMs must be > 0");
     }
 

@@ -159,7 +159,7 @@ export class GroupAwareLimit implements AdaptiveLimit {
     this.minGroupSamples = options?.minGroupSamples ?? 20;
     this.clock = options?.clock ?? (() => performance.now());
     this.recoveryProbeBaseMs = options?.recoveryProbe?.baseMs ?? 1000;
-    if (this.recoveryProbeBaseMs <= 0) {
+    if (!(this.recoveryProbeBaseMs > 0)) {
       throw new RangeError("recoveryProbe.baseMs must be > 0");
     }
 

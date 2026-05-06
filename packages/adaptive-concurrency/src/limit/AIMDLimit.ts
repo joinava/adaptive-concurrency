@@ -83,7 +83,7 @@ export class AIMDLimit implements AdaptiveLimit {
         "backoffRatio + backoffJitter must be < 1.0 to guarantee the limit decreases on drop",
       );
     }
-    if (this.recoveryProbeBaseMs <= 0) {
+    if (!(this.recoveryProbeBaseMs > 0)) {
       throw new RangeError("recoveryProbe.baseMs must be > 0");
     }
   }
