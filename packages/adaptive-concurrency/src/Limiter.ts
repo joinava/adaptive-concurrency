@@ -301,7 +301,9 @@ export class Limiter<
       this.recoveryProbeJitter < 0 ||
       this.recoveryProbeJitter >= 0.5
     ) {
-      throw new RangeError("recoveryProbe.jitter must be a finite number in [0, 0.5)");
+      throw new RangeError(
+        "recoveryProbe.jitter must be a finite number in [0, 0.5)",
+      );
     }
 
     this.timer = options.timer ?? {
@@ -780,17 +782,16 @@ export class Limiter<
 
       // not-null assertion is safe because of the shouldArmRecoveryProbe()
       // guard, but hard to prove to TS.
-      const base = this.limitAlgorithm.probeFromZeroInterval!(
+      const raw = this.limitAlgorithm.probeFromZeroInterval!(
         this.probeFailures,
       );
 
-      if (!Number.isFinite(base) || base <= 0) return;
+      // Cap before the finite check so that an exponential backoff that
+      // overflows to Infinity is clamped to recoveryProbeMaxMs instead of
+      // silently disabling recovery probing.
+      const capped = Math.min(this.recoveryProbeMaxMs, raw);
 
-      // Cap before jitter so `recoveryProbeMaxMs` is a (soft) bound on the
-      // unjittered interval. After jittering, the realized wait is symmetric
-      // around the capped value, with peaks up to `cap * (1 + jitter)`. This
-      // keeps the jitter distribution unbiased near the cap.
-      const capped = Math.min(this.recoveryProbeMaxMs, base);
+      if (!Number.isFinite(capped) || capped <= 0) return;
       const jitterFactor =
         1 + (Math.random() * 2 - 1) * this.recoveryProbeJitter;
       const ms = capped * jitterFactor;
