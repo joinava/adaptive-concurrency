@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { LimitAllotment } from "../../LimitAllotment.js";
+import { AllotmentReservation } from "../../AllotmentReservation.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
-import type { AcquireResult } from "../../Limiter.js";
+import type { AcquireResult, LimitAllotment } from "../../Limiter.js";
 import { Limiter } from "../../Limiter.js";
 import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
 import {
@@ -387,25 +387,29 @@ describe("Blocking backlog rejection strategies", () => {
       let acquireCallCount = 0;
       const ac = new AbortController();
 
+      const noopReservation = new AllotmentReservation(
+        () => {},
+        () => {},
+      );
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
         acquireStrategy: {
-          tryAcquireAllotment(_ctx, state) {
+          tryReserveAllotment(_ctx, state) {
             acquireCallCount++;
             if (acquireCallCount === 1) {
               // First call: the initial acquire that fills the limit.
-              return true;
+              return noopReservation;
             }
             if (state.inflight >= 1) {
-              return false;
+              return undefined;
             }
             if (!acquireGateResolve) {
               // First retry during drain: gate to let abort fire mid-retry.
-              return new Promise<boolean>((resolve) => {
-                acquireGateResolve = () => resolve(true);
+              return new Promise<AllotmentReservation>((resolve) => {
+                acquireGateResolve = () => resolve(noopReservation);
               });
             }
-            return true;
+            return noopReservation;
           },
           onAllotmentReleased() {},
           onLimitChanged() {},
@@ -830,25 +834,29 @@ describe("Blocking backlog rejection strategies", () => {
       let acquireCallCount = 0;
       const ac = new AbortController();
 
+      const noopReservation = new AllotmentReservation(
+        () => {},
+        () => {},
+      );
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
         acquireStrategy: {
-          tryAcquireAllotment(_ctx, state) {
+          tryReserveAllotment(_ctx, state) {
             acquireCallCount++;
             if (acquireCallCount === 1) {
-              return true;
+              return noopReservation;
             }
             if (state.inflight >= 1) {
-              return false;
+              return undefined;
             }
             if (!acquireGateResolve) {
               // First retry during drain (for the LIFO head): gate to let
               // abort fire mid-retry.
-              return new Promise<boolean>((resolve) => {
-                acquireGateResolve = () => resolve(true);
+              return new Promise<AllotmentReservation>((resolve) => {
+                acquireGateResolve = () => resolve(noopReservation);
               });
             }
-            return true;
+            return noopReservation;
           },
           onAllotmentReleased() {},
           onLimitChanged() {},

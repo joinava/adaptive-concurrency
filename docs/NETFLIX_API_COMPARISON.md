@@ -4,6 +4,7 @@ This document catalogs API and architecture differences between Netflix's Java l
 
 - `adaptive-concurrency` (core)
 - `@adaptive-concurrency/http` (HTTP middleware integration)
+- `@adaptive-concurrency/redis` (Redis-backed distributed token-bucket strategy)
 
 It is intended to help:
 
@@ -16,13 +17,13 @@ Reference Java repo: [Netflix/concurrency-limits](https://github.com/Netflix/con
 
 ## 1. Repository and integration surface
 
-| Java (Netflix)                                                              | TypeScript (this repo)                                            |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Multi-module Maven project (`concurrency-limits-core`, servlet, gRPC, etc.) | Monorepo with `packages/adaptive-concurrency` and `packages/http` |
-| Framework-specific servlet and gRPC integrations                            | HTTP middleware integration for Node/Express-style frameworks     |
-| Includes servlet filter and gRPC modules                                    | No gRPC package currently                                         |
+| Java (Netflix)                                                              | TypeScript (this repo)                                                      |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Multi-module Maven project (`concurrency-limits-core`, servlet, gRPC, etc.) | Monorepo with `packages/adaptive-concurrency`, `packages/http`, and `packages/redis` |
+| Framework-specific servlet and gRPC integrations                            | HTTP middleware integration for Node/Express-style frameworks               |
+| Includes servlet filter and gRPC modules                                    | No gRPC package currently                                                   |
 
-The TypeScript HTTP package is intentionally minimal and framework-agnostic, based on request/response shape rather than servlet APIs.
+The TypeScript HTTP package is intentionally minimal and framework-agnostic, based on request/response shape rather than servlet APIs. The Redis package is not a Java-port module; it adds a distributed token-bucket gate for cross-process rate limiting.
 
 ---
 
@@ -41,10 +42,20 @@ Java behavior is spread across classes/decorators:
 
 TypeScript uses one concrete `Limiter` class plus two extension points:
 
-- `AcquireStrategy<ContextT>`: decides slot allocation (semaphore, partitioned, etc.)
+- `AcquireStrategy<ContextT>`: decides slot allocation (semaphore, partitioned, Redis-composed, etc.)
 - `AllotmentUnavailableStrategy<ContextT>`: decides behavior when no slot is available
 
 This moves customization from subclassing to composition.
+
+### Slot allocation is two-phase
+
+Java's limiter implementations generally acquire or reject in one step. TypeScript acquire strategies now use an explicit reservation receipt:
+
+1. `tryReserveAllotment(context, state)` tentatively reserves capacity and returns `AllotmentReservation | undefined`.
+2. The limiter calls `reservation.commit()` after it has successfully built the caller-facing allotment.
+3. The limiter calls `reservation.cancel()` if a later admission step rejects or aborts before the allotment is returned.
+
+This two-phase API lets composed strategies avoid observable side effects from speculative work. For example, `PartitionedStrategy` can reserve a partition slot without emitting inflight metrics until commit, and `RedisTokenBucketStrategy` can cancel/refund if the outer decision rejects.
 
 ### Blocking is an allotment-unavailable strategy, not a wrapper limiter
 
@@ -81,10 +92,12 @@ Time conversion is a key migration concern: Java nanoseconds vs TypeScript milli
 | ----------------------------------- | ------------------------------------ |
 | `Limiter.Listener` nested interface | top-level `LimitAllotment` interface |
 | `onSuccess()`                       | `releaseAndRecordSuccess()`          |
-| `onIgnore()`                        | `releaseAndIgnore()`           |
+| `onIgnore()`                        | `releaseAndIgnore()`                 |
 | `onDropped()`                       | `releaseAndRecordDropped()`          |
 
 Semantics are equivalent: exactly one completion method should be called.
+
+`LimitAllotment` is the caller-facing completion handle. Strategy implementers work with `AllotmentReservation`, a separate idempotent commit/cancel receipt used before a caller-facing allotment exists.
 
 ### `Limiter` interface -> `Limiter` class
 
@@ -105,7 +118,7 @@ No Java equivalent. TypeScript `LimiterOptions` accepts an optional `operationNa
 
 - Java uses builder-level bypass resolvers/helpers (combined OR-style).
 - TypeScript `LimiterOptions` has `bypassResolver?: (context) => boolean`.
-- Bypassed calls return a no-op allotment and do not affect inflight/limit sampling.
+- Bypassed calls return a bypass allotment. They do not affect inflight/limit sampling, but they still emit call-level outcome metrics when released.
 
 ---
 
@@ -124,6 +137,7 @@ No direct Java equivalent.
 ### Other TS-only helpers/types
 
 - `LimiterState` (`{ limit, inflight }`) passed to acquire strategies
+- `AllotmentReservation` for two-phase acquire strategy implementations
 - `ListenerSet`
 - exported run helpers/types (`RunResult`, `RunSuccess`, `RunIgnore`, `RunDropped`)
 
@@ -152,6 +166,21 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 - Java's `maxDelayedThreads` maps to **`DelayedRejectStrategy`**'s `maxConcurrentDelays` (default 100).
 - `PartitionedStrategy` requires `initialLimit`.
 - `PartitionedStrategy` itself throws if no partitions are provided; `HttpLimiterBuilder` falls back to non-partitioned `Limiter` when no partitions are configured.
+- `PartitionedStrategy` tracks reserved and committed inflight counts separately. Reservations count against admission, but partition inflight distribution metrics are emitted only on commit so cancelled reservations do not leave metric noise.
+
+### Redis token bucket strategy
+
+There is no Java equivalent in Netflix's core library.
+
+The `@adaptive-concurrency/redis` package provides:
+
+- `RedisTokenBucket`: minimal Redis `SCRIPT LOAD` / `EVALSHA` token bucket wrapper with acquire and refund scripts.
+- `RedisTokenBucketStrategy`: an `AcquireStrategy` composer that runs an inner strategy first, then consumes a Redis token.
+- `keyResolver?: (context) => string` to partition token buckets by tenant/route/etc.; default key is `"default"`.
+- Graceful degradation: Redis acquire failures are treated as granted, refund failures are dropped, and optional `onError` callbacks provide observability.
+- Reservation error reporting via `onReservationError({ context, phase, error })` when the inner reservation's commit/cancel throws.
+
+The inner-first ordering is deliberate: local semaphore/partition rejection can short-circuit before paying the Redis round trip. The tradeoff is a brief speculative reservation window while the Redis call is in flight.
 
 ### Blocking strategy behavior
 
@@ -176,6 +205,7 @@ Additional details:
 - `enqueueOptions.direction` determines LIFO (`"front"`) vs FIFO (`"back"`), and `enqueueOptions` can be provided as a function of context.
 - `LinkedWaiterQueue` now acts as a priority queue; `enqueueOptions.priority` can be used to prioritize queued waiters (higher priority is served first).
 - Both strategies react to limit increases (`onLimitChanged`) by scheduling a backlog drain, so queued callers can be served without waiting for another release event.
+- Enqueuing a waiter also schedules a coalesced opportunistic drain. This prevents lost wakeups when a release happens between a failed acquire attempt and the caller being fully enqueued. Drains are serialized (`drainInProgress`) and retry only the current queue head; a release that happens during an in-flight retry is remembered and causes the loop to retry rather than losing capacity.
 - `DelayedRejectStrategy`: awaits a delay then returns no allotment (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
 - `DelayedThenBlockingRejection`: runs delayed rejection first, then retries once, and if still unavailable delegates to configured blocking strategy.
 
@@ -357,6 +387,8 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 - `QuotaNotAvailable` sentinel
 - `LimiterState` strategy input
 - `AcquireStrategy` / `AllotmentUnavailableStrategy` public extension points
+- `AllotmentReservation` two-phase strategy receipt
+- `@adaptive-concurrency/redis` (`RedisTokenBucket`, `RedisTokenBucketStrategy`)
 - `DelayedThenBlockingRejection`
 - limiter factory helpers (`makeSimpleLimiter`, `makeBlockingLimiter`, `makeLifoBlockingLimiter`, `makePartitionedLimiter`, `makePartitionedBlockingLimiter`, `makePartitionedLifoBlockingLimiter`)
 - `ListenerSet`
@@ -381,12 +413,13 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 3. Replace `Limit` API usage with `AdaptiveLimit` (`getLimit`/`notifyOnChange`/`onSample` -> `currentLimit`/`subscribe`/`addSample`).
 4. Convert nanosecond logic to milliseconds.
 5. Replace builder/decorator constructions with `new Limiter({...})` plus strategies.
-6. Replace `BlockingLimiter`/`LifoBlockingLimiter` wrapping with `allotmentUnavailableStrategy` strategies.
-7. For partitioned limiting, pass a single `partitionResolver` in the `PartitionedStrategy` constructor options (compose multiple Java-style resolvers yourself, or use `HttpLimiterBuilder`, which does this at `build()`).
-8. If you need stricter partition bursting than Java defaults, configure TS `PartitionConfig.burstMode` (`unbounded`/`capped`/`none`).
-9. If using TS partitioned factory helpers and Java-style reject delays, set per-partition `delayMs` (factory convenience) or wire your own `DelayedRejectStrategy`.
-10. Prefer `withLimiter(limiter)` for scoped acquire/complete flows where appropriate.
-11. If using TS blocking factories, use `backlogTimeout`/`backlogSize` options (not `timeout`).
+6. When implementing a custom acquire strategy, implement the two-phase `tryReserveAllotment()` contract and resolve each returned `AllotmentReservation` exactly once via `commit()` or `cancel()`.
+7. Replace `BlockingLimiter`/`LifoBlockingLimiter` wrapping with `allotmentUnavailableStrategy` strategies.
+8. For partitioned limiting, pass a single `partitionResolver` in the `PartitionedStrategy` constructor options (compose multiple Java-style resolvers yourself, or use `HttpLimiterBuilder`, which does this at `build()`).
+9. If you need stricter partition bursting than Java defaults, configure TS `PartitionConfig.burstMode` (`unbounded`/`capped`/`none`).
+10. If using TS partitioned factory helpers and Java-style reject delays, set per-partition `delayMs` (factory convenience) or wire your own `DelayedRejectStrategy`.
+11. Prefer `withLimiter(limiter)` for scoped acquire/complete flows where appropriate.
+12. If using TS blocking factories, use `backlogTimeout`/`backlogSize` options (not `timeout`).
 
 ---
 
@@ -394,10 +427,11 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 
 When upstream Java commits change behavior, likely TS touchpoints are:
 
-- listener lifecycle/acquire semantics -> `Limiter.ts`, `LimitAllotment.ts`
+- listener lifecycle/acquire semantics -> `Limiter.ts`, `withLimiter.ts`, `AllotmentReservation.ts`, `types/Strategy.ts`
 - partition logic -> `limiter/acquire-strategies/PartitionedStrategy.ts`
 - blocking behavior -> `limiter/allocation-unavailable-strategies/BlockingBacklogRejection.ts`, `limiter/allocation-unavailable-strategies/DelayedThenBlockingRejection.ts`
 - Java partition reject delay -> `limiter/allocation-unavailable-strategies/DelayedRejectStrategy.ts` (optional; compose with `delayMsForContext` or via factory `delayMs`)
+- Redis token-bucket behavior -> `packages/redis/src/RedisTokenBucket.ts`, `packages/redis/src/RedisTokenBucketStrategy.ts`
 - algorithm math -> files under `limit/` (including `GroupAwareLimit.ts`, `DecayingHistogram.ts`)
 - metrics tagging/counters -> `MetricRegistry.ts` (`MetricIds`) + limiter/strategy call sites
 - operation name plumbing -> `StreamingLimit.ts` (`AdaptiveLimit.addSample` signature), `Limiter.ts` (`operationNameFor`)

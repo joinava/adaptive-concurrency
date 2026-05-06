@@ -1,10 +1,11 @@
-import type { AcquireStrategy, LimiterState } from "../../Limiter.js";
+import { AllotmentReservation } from "../../AllotmentReservation.js";
 import type {
   DistributionMetric,
   Gauge,
   MetricRegistry,
 } from "../../MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "../../MetricRegistry.js";
+import type { LimiterState } from "../../types/Strategy.js";
 
 const PARTITION_TAG_NAME = "partition";
 
@@ -50,8 +51,7 @@ export type PartitionConfig = {
  *   - `none`: admit only up to `limitAtGlobalSaturation`.
  *
  * - If `globalInflight >= globalLimit`, admission is checked against the
- *   resolved partition's limitAtGlobalSaturation only (`tryAcquire` on that
- *   partition).
+ *   resolved partition's limitAtGlobalSaturation only.
  *
  * Requests resolving to no configured partition use an internal `unknown`
  * partition. Unknown requests can use slack below global saturation, but are
@@ -62,8 +62,8 @@ export type PartitionConfig = {
  * - **Unbounded bursting:** A can reach inflight 10 while B is 0.
  *
  * - **Limit-at-global-saturation catch-up at saturation:** if A=10 and B=0,
- *   then B requests can still be admitted up to B=5 via `tryAcquire`, so global
- *   inflight can temporarily reach 15.
+ *   then B requests can still be admitted up to B=5, so global inflight can
+ *   temporarily reach 15.
  *
  * - **No cross-partition borrowing:** at that same point (with A=10), an
  *   `unknown` request is rejected (it cannot use B's unused
@@ -78,11 +78,17 @@ export type PartitionConfig = {
  *   and total concurrent acquires can substantially exceed global limit due to
  *   bursting. This is usually temporary as RTT rises and excess work is shed by
  *   adaptive limiting over time.
+ *
+ * Each partition tracks committed inflight and speculative reservations
+ * separately: admission decisions count both, but the `inflightDistribution`
+ * metric only samples on commit, so composers (e.g. `RedisTokenBucketStrategy`)
+ * can speculatively reserve without polluting the partition's inflight
+ * distribution if the outer admission decision rejects.
  */
 export class PartitionedStrategy<
   ContextT,
   PartitionName extends string = string,
-> implements AcquireStrategy<ContextT> {
+> {
   private readonly knownPartitions: Map<
     PartitionName,
     Partition<PartitionName>
@@ -154,19 +160,29 @@ export class PartitionedStrategy<
       percent: 0,
       burstMode: { kind: "unbounded" },
       // Java never calls updateLimit on unknown; limitAtGlobalSaturation stays
-      // 0, so tryAcquire always fails at global saturation.
+      // 0, so reservations always fail at global saturation.
       initialLimitAtGlobalSaturation: 0,
       registry,
     });
   }
 
-  tryAcquireAllotment(context: ContextT, state: LimiterState): boolean {
+  /**
+   * Tentatively claim a slot without firing the `inflightDistribution` sample
+   * (or any other observable side effect). Returns an
+   * {@link AllotmentReservation} on success (caller must resolve it via
+   * `commit()` or `cancel()`); returns `undefined` if no slot is available.
+   * Reserved slots count against admission for concurrent acquires, so the
+   * partition never over-admits during the speculative window.
+   */
+  tryReserveAllotment(
+    context: ContextT,
+    state: LimiterState,
+  ): AllotmentReservation | undefined {
     const partition = this.resolvePartition(context);
 
-    if (state.inflight >= state.limit) {
-      return partition.tryAcquire();
-    }
-    return partition.acquireWithinBurst();
+    return state.inflight >= state.limit
+      ? partition.tryReserveAtSaturation()
+      : partition.tryReserveWithinBurst();
   }
 
   onAllotmentReleased(context: ContextT): void {
@@ -194,6 +210,7 @@ export class PartitionedStrategy<
       burstMode: partition.burstMode,
       limitAtGlobalSaturation: partition.limitAtGlobalSaturation,
       inFlight: partition.inFlight,
+      reserved: partition.reserved,
       isLimitAtGlobalSaturationExceeded:
         partition.isLimitAtGlobalSaturationExceeded,
     };
@@ -229,6 +246,7 @@ class Partition<PartitionName extends string = string> {
   public readonly limitAtGlobalSaturationGauge: Gauge;
 
   private _inflight = 0;
+  private _reserved = 0;
   private _limitAtGlobalSaturation: number;
 
   constructor(init: {
@@ -291,26 +309,35 @@ class Partition<PartitionName extends string = string> {
     return this._inflight >= this._limitAtGlobalSaturation;
   }
 
-  acquire(): void {
-    this._inflight++;
-    this.inflightDistribution.addSample(this._inflight);
+  tryReserveWithinBurst(): AllotmentReservation | undefined {
+    return this.occupied >= this.burstCapBelowGlobalSaturation()
+      ? undefined
+      : this.makeReservation();
   }
 
-  acquireWithinBurst(): boolean {
-    if (this._inflight >= this.burstCapBelowGlobalSaturation()) {
-      return false;
-    }
-    this.acquire();
-    return true;
+  tryReserveAtSaturation(): AllotmentReservation | undefined {
+    return this.occupied >= this._limitAtGlobalSaturation
+      ? undefined
+      : this.makeReservation();
   }
 
-  tryAcquire(): boolean {
-    if (this._inflight < this._limitAtGlobalSaturation) {
-      this._inflight++;
-      this.inflightDistribution.addSample(this._inflight);
-      return true;
-    }
-    return false;
+  /**
+   * Bumps `_reserved` and returns a receipt whose `commit()` / `cancel()`
+   * will undo the reservation exactly once. The receipt closes over `this`,
+   * so callers don't need to know which partition issued it.
+   */
+  private makeReservation(): AllotmentReservation {
+    this._reserved++;
+    return new AllotmentReservation(
+      () => {
+        this._reserved--;
+        this._inflight++;
+        this.inflightDistribution.addSample(this._inflight);
+      },
+      () => {
+        this._reserved--;
+      },
+    );
   }
 
   release(): void {
@@ -319,6 +346,19 @@ class Partition<PartitionName extends string = string> {
 
   get inFlight(): number {
     return this._inflight;
+  }
+
+  get reserved(): number {
+    return this._reserved;
+  }
+
+  /**
+   * Total occupied slots = committed inflight + speculative reservations.
+   * Used for admission decisions so the partition never over-admits while
+   * speculative reservations are pending.
+   */
+  private get occupied(): number {
+    return this._inflight + this._reserved;
   }
 
   private burstCapBelowGlobalSaturation(): number {
@@ -339,6 +379,6 @@ class Partition<PartitionName extends string = string> {
   }
 
   toString(): string {
-    return `Partition [pct=${this.percent}, limitAtGlobalSaturation=${this._limitAtGlobalSaturation}, inflight=${this._inflight}]`;
+    return `Partition [pct=${this.percent}, limitAtGlobalSaturation=${this._limitAtGlobalSaturation}, inflight=${this._inflight}, reserved=${this._reserved}]`;
   }
 }

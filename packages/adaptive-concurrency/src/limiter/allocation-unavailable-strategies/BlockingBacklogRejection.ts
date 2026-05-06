@@ -1,8 +1,8 @@
-import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
-} from "../../Limiter.js";
+  LimitAllotment,
+} from "../../types/Strategy.js";
 import type { EnqueueOptions } from "../../utils/LinkedWaiterQueue.js";
 
 export type Waiter<ContextT> = {
@@ -44,6 +44,7 @@ export class BlockingBacklogRejection<
   private readonly getEnqueueOptions: (context: ContextT) => EnqueueOptionsT;
   private readonly queue: WaiterQueue<ContextT, Handle, EnqueueOptionsT>;
   private drainInProgress = false;
+  private drainScheduled = false;
   private releaseDuringDrain = false;
 
   constructor(
@@ -102,6 +103,14 @@ export class BlockingBacklogRejection<
       return;
     }
 
+    await this.drainBacklog();
+  }
+
+  private async drainBacklog(): Promise<void> {
+    if (this.drainInProgress) {
+      return;
+    }
+
     if (this.queue.size() === 0) {
       return;
     }
@@ -141,6 +150,18 @@ export class BlockingBacklogRejection<
     }
   }
 
+  private scheduleDrain(): void {
+    if (this.drainScheduled) {
+      return;
+    }
+
+    this.drainScheduled = true;
+    queueMicrotask(() => {
+      this.drainScheduled = false;
+      void this.drainBacklog();
+    });
+  }
+
   onLimitChanged(oldLimit: number, newLimit: number): void {
     if (newLimit > oldLimit) {
       queueMicrotask(() => {
@@ -172,6 +193,7 @@ export class BlockingBacklogRejection<
 
       const enqueueOptions = this.getEnqueueOptions(context);
       const { handle } = this.queue.enqueue(waiter, enqueueOptions);
+      this.scheduleDrain();
 
       const timer = setTimeout(() => settle(undefined), timeout);
       const onAbort = (): void => settle(undefined);

@@ -1,6 +1,5 @@
 import { GradientLimit } from "./limit/GradientLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
-import type { LimitAllotment } from "./LimitAllotment.js";
 import { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
 import type {
   Counter,
@@ -9,104 +8,29 @@ import type {
   MetricRegistry,
 } from "./MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "./MetricRegistry.js";
-import {
-  isAdaptiveTimeoutError,
-  isRunResult,
-  QuotaNotAvailable,
-  type RunResult,
-} from "./RunResult.js";
+import type { MaybePromise } from "./types/MaybePromise.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  AcquireStrategy,
+  AllotmentUnavailableStrategy,
+  LimitAllotment,
+} from "./types/Strategy.js";
 
-export type MaybePromise<T> = T | Promise<T>;
-
-/**
- * Acquire is async-only.
- */
-export type AcquireResult = Promise<LimitAllotment | undefined>;
-
-export interface AcquireOptions<ContextT = void> {
-  context?: ContextT;
-  signal?: AbortSignal | undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Strategy interfaces
-// ---------------------------------------------------------------------------
-
-/**
- * Read-only view of the limiter's current state, provided to strategies so
- * they can make gating decisions without coupling to the Limiter class.
- */
-export interface LimiterState {
-  readonly limit: number;
-  readonly inflight: number;
-}
-
-/**
- * Decides whether a non-bypassed caller may take a concurrency allotment and
- * updates strategy bookkeeping when they may (e.g. permits counter or
- * per-partition tracking).
- */
-export interface AcquireStrategy<ContextT> {
-  /**
-   * Tries to acquire an allotment for this request under the strategy's rules.
-   * When `true`, the strategy has reserved capacity for one inflight unit; when
-   * `false`, an allotment was not available.
-   */
-  tryAcquireAllotment(
-    context: ContextT,
-    state: LimiterState,
-  ): MaybePromise<boolean>;
-
-  /**
-   * Called when an acquired allotment completes (success, ignore, or drop).
-   * Perform any cleanup (e.g. increment permits, release a partition slot).
-   */
-  onAllotmentReleased(context: ContextT): MaybePromise<void>;
-
-  /**
-   * Called when the adaptive limit changes. The strategy can react
-   * (e.g. adjust available permits by the delta, update partition sub-limits).
-   */
-  onLimitChanged?(oldLimit: number, newLimit: number): void;
-}
-
-/**
- * Determines what happens when a request is rejected by the
- * {@link AcquireStrategy} (e.g. queue the caller, reject immediately, or block
- * until a slot is available). Implementations must return an
- * {@link AcquireResult}, which is always a `Promise`.
- */
-export interface AllotmentUnavailableStrategy<ContextT> {
-  /**
-   * Called when the acquire strategy cannot allocate an allotment for a
-   * request.
-   *
-   * @param context The request context.
-   * @param retry Callback to re-attempt acquisition. The rejection strategy can
-   *   call this after a waiter is woken to try again. The retry runs
-   *   {@link AcquireStrategy.tryAcquireAllotment} and, if successful, returns a
-   *   ready-to-use allotment with all required wrapping.
-   * @param signal Optional abort signal from the caller.
-   */
-  onAllotmentUnavailable(
-    context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
-    signal?: AbortSignal,
-  ): AcquireResult;
-
-  /**
-   * Called whenever any allotment is released (success, ignore, or drop).
-   * Blocking strategies use this to wake queued waiters.
-   */
-  onAllotmentReleased(): MaybePromise<void>;
-
-  /**
-   * Called when the adaptive limit changes. Blocking/rejection strategies can
-   * use this to proactively react to newly available capacity (e.g. drain
-   * backlog).
-   */
-  onLimitChanged?(oldLimit: number, newLimit: number): MaybePromise<void>;
-}
+export type { MaybePromise } from "./types/MaybePromise.js";
+export type {
+  AcquireOptions,
+  AcquireResult,
+  AcquireStrategy,
+  AllotmentUnavailableStrategy,
+  LimitAllotment,
+  LimiterState,
+} from "./types/Strategy.js";
+export {
+  withLimiter,
+  type LimitedFunction,
+  type RunCallbackArgs,
+} from "./withLimiter.js";
 
 // ---------------------------------------------------------------------------
 // Limiter options
@@ -415,18 +339,12 @@ export class Limiter<
     }
 
     const acquireStart = this.clock();
+    const allotment = await this.tryAcquireCore(ctx, acquireStart);
 
-    const state: LimiterState = {
-      limit: this._limit,
-      inflight: this._inflight,
-    };
-
-    if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
-      this.acquireFailedCounter.add(1);
+    if (!allotment) {
       if (!this.rejectionStrategy) {
-        this.acquireTimeOnUnavailableDistribution.addSample(
-          this.clock() - acquireStart,
-        );
+        const now = this.clock();
+        this.acquireTimeOnUnavailableDistribution.addSample(now - acquireStart);
         return undefined;
       }
 
@@ -443,24 +361,21 @@ export class Limiter<
           if (options?.signal?.aborted) {
             return undefined;
           }
-          return this.tryAcquireCore(retryCtx);
+          return this.tryAcquireCore(retryCtx, acquireStart);
         },
         options?.signal,
       );
 
-      try {
-        const distribution = result
-          ? this.acquireTimeOnSuccessDistribution
-          : this.acquireTimeOnUnavailableDistribution;
-        distribution.addSample(this.clock() - acquireStart);
-      } catch {
-        // Best-effort metric update: do not fail the acquire path after
-        // capacity has already been acquired via the rejection strategy.
+      // If we still don't have an allotment, record the acquire time as unavailable.
+      if (!result) {
+        const now = this.clock();
+        this.acquireTimeOnUnavailableDistribution.addSample(now - acquireStart);
+        return undefined;
       }
 
-      if (result && options?.signal?.aborted) {
-        // The rejection strategy may have acquired via retry just before the
-        // signal aborted. Return the caller's capacity to the limiter.
+      // If the rejection strategy acquired via retry just before the signal
+      // aborted, return the caller's capacity to the limiter.
+      if (options?.signal?.aborted) {
         await result.releaseAndIgnore();
         return undefined;
       }
@@ -468,22 +383,8 @@ export class Limiter<
       return result;
     }
 
-    const allotment = await this.createAllotment(ctx);
-    try {
-      this.acquireSucceededCounter.add(1);
-
-      // Record the acquire time as a success, since we did actually succeed even
-      // if we abort below.
-      this.acquireTimeOnSuccessDistribution.addSample(
-        this.clock() - acquireStart,
-      );
-    } catch {
-      // Best-effort metric update: do not fail the acquire path after
-      // capacity has already been reserved and an allotment created.
-    }
-
+    // same idea as above: here, we did acquire, so we need to try to cleanup.
     if (options?.signal?.aborted) {
-      // here, we did acquire, so we need to try to cleanup.
       await allotment.releaseAndIgnore();
       return undefined;
     }
@@ -491,47 +392,53 @@ export class Limiter<
     return allotment;
   }
 
-  private async tryAcquireCore(ctx: Context): AcquireResult {
-    const state: LimiterState = {
+  private async tryAcquireCore(
+    ctx: Context,
+    acquireStart: number,
+  ): AcquireResult {
+    const reservation = await this.acquireStrategy.tryReserveAllotment(ctx, {
       limit: this._limit,
       inflight: this._inflight,
-    };
+    });
 
-    if (!(await this.acquireStrategy.tryAcquireAllotment(ctx, state))) {
+    if (!reservation) {
       this.acquireFailedCounter.add(1);
       return undefined;
     }
 
-    // increment counter only after we've successfully acquired the allotment
-    const allotment = await this.createAllotment(ctx);
-    try {
-      this.acquireSucceededCounter.add(1);
-    } catch {
-      // Best-effort metric update: do not fail the acquire path after
-      // capacity has already been reserved and an allotment created.
-    }
-
-    return allotment;
-  }
-
-  private async createAllotment(ctx: Context): Promise<LimitAllotment> {
-    // Capture quantities derived from user-supplied callbacks BEFORE
-    // touching `_inflight`. If `clock()` or `operationNameFor()` throws,
-    // the strategy has already reserved a slot in `tryAcquireAllotment`
-    // and we must roll that reservation back — otherwise the permit is
-    // permanently leaked and concurrent admission silently degrades.
-    let startTime: number;
+    // Capture quantities derived from user-supplied callbacks BEFORE committing
+    // the reservation. If `clock()` or `operationNameFor()` throws we cancel
+    // the reservation cleanly: cancellation is contractually side-effect free
+    // beyond admission bookkeeping, so composers like
+    // `RedisTokenBucketStrategy` get a chance to refund resources they consumed
+    // during reserve (e.g. the bucket token) — something `onAllotmentReleased`
+    // couldn't do because that hook is semantically "completed allotment", not
+    // "abandoned reservation".
+    let operationStartTime: number;
     let operationName: string | undefined;
     try {
-      startTime = this.clock();
+      operationStartTime = this.clock();
       operationName = this.operationNameFor?.(ctx);
     } catch (err) {
-      // Best-effort release of the strategy reservation. We're about to
-      // throw to the caller of `acquire()`, who will not get an allotment
-      // to release manually.
-      await fireAndForget(() => this.acquireStrategy.onAllotmentReleased(ctx));
+      await fireAndForget(() => reservation.cancel());
       throw err;
     }
+
+    void fireAndForget(() => this.acquireSucceededCounter.add(1));
+    void fireAndForget(() => {
+      if (operationStartTime !== undefined) {
+        this.acquireTimeOnSuccessDistribution.addSample(
+          operationStartTime - acquireStart,
+        );
+      }
+    });
+
+    // Commit only after the throwable user-supplied work above has succeeded.
+    // If `commit()` itself throws, the reservation is in an indeterminate state
+    // per the AllotmentReservation contract; we propagate the error without
+    // touching `_inflight` or building an allotment, leaving the strategy
+    // responsible for its own cleanup.
+    await reservation.commit();
 
     const currentInflight = ++this._inflight;
     const incrementTags = operationName
@@ -548,6 +455,7 @@ export class Limiter<
       releaseAndRecordSuccess: async () => {
         if (releaseStarted) return;
         releaseStarted = true;
+        const endTime = this.safeReadClockWithFallback(undefined);
 
         // Every interaction with user-supplied code (metrics, clock, the
         // limit algorithm, the strategies) is wrapped in try/catch so that
@@ -555,8 +463,6 @@ export class Limiter<
         // a leaked permit or stall queued waiters in a blocking rejection
         // strategy. This release method must never throw or reject (per
         // `LimitAllotment` contract).
-        const endTime = this.safeReadClockWithFallback(startTime);
-        const rtt = endTime - startTime;
         this._inflight--;
         void fireAndForget(() => {
           this.successCounter.add(1, incrementTags);
@@ -576,13 +482,17 @@ export class Limiter<
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          this.limitAlgorithm.addSample(
-            startTime,
-            rtt,
-            currentInflight,
-            false,
-            operationName,
-          );
+          // if clock threw, preventing us from getting an rtt, we don't add a sample.
+          if (endTime !== undefined) {
+            const rtt = endTime - operationStartTime;
+            this.limitAlgorithm.addSample(
+              operationStartTime,
+              rtt,
+              currentInflight,
+              false,
+              operationName,
+            );
+          }
         } catch {}
         try {
           await this.rejectionStrategy?.onAllotmentReleased();
@@ -621,8 +531,8 @@ export class Limiter<
         if (releaseStarted) return;
         releaseStarted = true;
 
-        const endTime = this.safeReadClockWithFallback(startTime);
-        const rtt = endTime - startTime;
+        const endTime = this.safeReadClockWithFallback(operationStartTime);
+        const rtt = endTime - operationStartTime;
         this._inflight--;
         void fireAndForget(() => {
           this.droppedCounter.add(1, incrementTags);
@@ -639,7 +549,7 @@ export class Limiter<
         } catch {}
         try {
           this.limitAlgorithm.addSample(
-            startTime,
+            operationStartTime,
             rtt,
             currentInflight,
             true,
@@ -653,7 +563,9 @@ export class Limiter<
     };
   }
 
-  private safeReadClockWithFallback(fallback: number): number {
+  private safeReadClockWithFallback<T extends number | undefined>(
+    fallback: T,
+  ): T | number {
     try {
       return this.clock();
     } catch {
@@ -663,7 +575,7 @@ export class Limiter<
 
   /**
    * Builds a per-acquire allotment for a bypassed request. Mirrors the
-   * one-shot `releaseStarted` semantics of {@link createAllotment} so that
+   * one-shot `releaseStarted` semantics of {@link tryAcquireCore} so that
    * bypassed and non-bypassed allotments behave consistently when callers
    * accidentally invoke a release method more than once.
    *
@@ -847,112 +759,6 @@ export class Limiter<
       this.timer.clearTimeout(handle);
     });
   }
-}
-
-export type RunCallbackArgs<ContextT> = {
-  context: ContextT | undefined;
-  signal: AbortSignal | undefined;
-};
-export interface LimitedFunction<ContextT> {
-  <T, E extends Error = Error>(
-    fn: (
-      args: RunCallbackArgs<ContextT>,
-    ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>,
-  ): Promise<T | typeof QuotaNotAvailable>;
-
-  <T, E extends Error = Error>(
-    options: AcquireOptions<ContextT>,
-    fn: (
-      args: RunCallbackArgs<ContextT>,
-    ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>,
-  ): Promise<T | typeof QuotaNotAvailable>;
-}
-
-/**
- * Creates a helper that runs callbacks under acquired limiter allotments.
- *
- * - If {@link Limiter.acquire} yields no allotment, returns
- *   {@link QuotaNotAvailable} without invoking `fn`.
- * - On {@link RunResult} `success` / `ignore`, returns the carried value after
- *   recording success/ignore to the allotment.
- * - On `dropped`, records drop and throws the carried error.
- * - If callback returns a non-{@link RunResult} value, it is treated as
- *   implicit success and returned as-is.
- * - On uncaught exceptions from `fn`, records ignore and rethrows, except for
- *   {@link AdaptiveTimeoutError}, which records drop and rethrows.
- * - Callback receives `{ context, signal }` from acquire options.
- */
-export function withLimiter<ContextT>(
-  limiter: Limiter<ContextT>,
-): LimitedFunction<ContextT> {
-  type LimitedFn<T, E extends Error = Error> = (
-    args: RunCallbackArgs<ContextT>,
-  ) => T | RunResult<T, E> | Promise<T | RunResult<T, E>>;
-
-  async function limited<T, E extends Error = Error>(
-    fn: LimitedFn<T, E>,
-  ): Promise<T | typeof QuotaNotAvailable>;
-  async function limited<T, E extends Error = Error>(
-    options: AcquireOptions<ContextT>,
-    fn: LimitedFn<T, E>,
-  ): Promise<T | typeof QuotaNotAvailable>;
-  async function limited<T, E extends Error = Error>(
-    optionsOrFn: AcquireOptions<ContextT> | LimitedFn<T, E>,
-    maybeFn?: LimitedFn<T, E>,
-  ): Promise<T | typeof QuotaNotAvailable> {
-    const [options, fn] =
-      typeof optionsOrFn === "function"
-        ? [undefined, optionsOrFn]
-        : [optionsOrFn, maybeFn];
-
-    if (!fn) {
-      throw new Error("No function provided");
-    }
-
-    const allotment = await limiter.acquire(options);
-    if (!allotment) {
-      return QuotaNotAvailable;
-    }
-
-    const [result] = await Promise.allSettled([
-      Promise.resolve().then(() =>
-        fn({ context: options?.context, signal: options?.signal }),
-      ),
-    ]);
-
-    if (result.status === "rejected") {
-      if (isAdaptiveTimeoutError(result.reason)) {
-        await allotment.releaseAndRecordDropped();
-      } else {
-        await allotment.releaseAndIgnore();
-      }
-      throw result.reason;
-    }
-
-    const outcome = result.value;
-    if (!isRunResult(outcome)) {
-      await allotment.releaseAndRecordSuccess();
-      return outcome;
-    }
-
-    const outcomeCast = outcome satisfies
-      | Awaited<T>
-      | RunResult<T, E> as RunResult<T, E>;
-
-    switch (outcomeCast.kind) {
-      case "success":
-        await allotment.releaseAndRecordSuccess();
-        return outcomeCast.value;
-      case "ignore":
-        await allotment.releaseAndIgnore();
-        return outcomeCast.value;
-      case "dropped":
-        await allotment.releaseAndRecordDropped();
-        throw outcomeCast.error;
-    }
-  }
-
-  return limited;
 }
 
 async function fireAndForget(fn: () => MaybePromise<void>): Promise<void> {
