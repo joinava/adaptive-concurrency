@@ -8,19 +8,42 @@ describe("SemaphoreStrategy", () => {
   it("should use permits until exhausted", () => {
     const strategy = new SemaphoreStrategy(2);
 
-    assert.equal(strategy.tryAcquireAllotment(), true);
-    assert.equal(strategy.tryAcquireAllotment(), true);
-    assert.equal(strategy.tryAcquireAllotment(), false);
+    const r1 = strategy.tryReserveAllotment();
+    const r2 = strategy.tryReserveAllotment();
+    assert.ok(r1);
+    assert.ok(r2);
+    r1.commit();
+    r2.commit();
+    assert.equal(strategy.tryReserveAllotment(), undefined);
   });
 
   it("should restore permits when allotments are released", () => {
     const strategy = new SemaphoreStrategy(1);
 
-    assert.equal(strategy.tryAcquireAllotment(), true);
-    assert.equal(strategy.tryAcquireAllotment(), false);
+    const r1 = strategy.tryReserveAllotment();
+    assert.ok(r1);
+    r1.commit();
+    assert.equal(strategy.tryReserveAllotment(), undefined);
 
     strategy.onAllotmentReleased();
-    assert.equal(strategy.tryAcquireAllotment(), true);
+    const r2 = strategy.tryReserveAllotment();
+    assert.ok(r2);
+    r2.commit();
+  });
+
+  it("should restore the permit when a reservation is cancelled", () => {
+    const strategy = new SemaphoreStrategy(1);
+
+    const r1 = strategy.tryReserveAllotment();
+    assert.ok(r1);
+    assert.equal(
+      strategy.tryReserveAllotment(),
+      undefined,
+      "speculative reservation counts against the permit",
+    );
+    r1.cancel();
+    const r2 = strategy.tryReserveAllotment();
+    assert.ok(r2, "permit returned after cancel");
   });
 
   it("should adjust permits when limit changes", async () => {

@@ -7,6 +7,38 @@ import {
 } from "./PartitionedStrategy.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
+import {
+  MetricIds,
+  type Counter,
+  type DistributionMetric,
+  type Gauge,
+  type MetricRegistry,
+} from "../../MetricRegistry.js";
+
+function makeRecordingRegistry(): {
+  registry: MetricRegistry;
+  inflightSamplesByPartition: Map<string, number[]>;
+} {
+  const inflightSamplesByPartition = new Map<string, number[]>();
+  const registry: MetricRegistry = {
+    distribution(id, attributes): DistributionMetric {
+      if (id === MetricIds.INFLIGHT_NAME) {
+        const partition = attributes?.["partition"] ?? "<unknown>";
+        const samples = inflightSamplesByPartition.get(partition) ?? [];
+        inflightSamplesByPartition.set(partition, samples);
+        return { addSample: (value: number) => samples.push(value) };
+      }
+      return { addSample() {} };
+    },
+    gauge(): Gauge {
+      return { record() {} };
+    },
+    counter(): Counter {
+      return { add() {} };
+    },
+  };
+  return { registry, inflightSamplesByPartition };
+}
 
 function makePartitionedLimiter<
   ContextT,
@@ -231,6 +263,127 @@ describe("PartitionedStrategy", () => {
     assert.deepEqual(partition?.burstMode, {
       kind: "capped",
       maxBurstMultiplier: 3,
+    });
+  });
+
+  describe("two-phase reservation API", () => {
+    it("does not emit an inflight distribution sample on cancelled reservations", async () => {
+      const { registry, inflightSamplesByPartition } = makeRecordingRegistry();
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 4,
+        partitionResolver: (ctx) => ctx,
+        partitions: { a: { percent: 1.0 } },
+        metricRegistry: registry,
+      });
+
+      const fakeState = { limit: 4, inflight: 0 };
+      const reservation = strategy.tryReserveAllotment("a", fakeState);
+      assert.ok(reservation, "reservation should be granted");
+      assert.equal(
+        strategy.getPartition("a")?.inFlight,
+        0,
+        "reserved-but-not-committed must not advance committed inflight",
+      );
+      assert.equal(strategy.getPartition("a")?.reserved, 1);
+
+      await reservation.cancel();
+      assert.equal(strategy.getPartition("a")?.reserved, 0);
+      assert.equal(strategy.getPartition("a")?.inFlight, 0);
+      assert.deepEqual(
+        inflightSamplesByPartition.get("a") ?? [],
+        [],
+        "cancelled reservation must not emit any inflight distribution sample",
+      );
+    });
+
+    it("emits exactly one inflight distribution sample on a committed reservation", async () => {
+      const { registry, inflightSamplesByPartition } = makeRecordingRegistry();
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 4,
+        partitionResolver: (ctx) => ctx,
+        partitions: { a: { percent: 1.0 } },
+        metricRegistry: registry,
+      });
+
+      const fakeState = { limit: 4, inflight: 0 };
+      const reservation = strategy.tryReserveAllotment("a", fakeState);
+      assert.ok(reservation);
+      await reservation.commit();
+
+      assert.equal(strategy.getPartition("a")?.inFlight, 1);
+      assert.equal(strategy.getPartition("a")?.reserved, 0);
+      assert.deepEqual(inflightSamplesByPartition.get("a"), [1]);
+    });
+
+    it("counts reserved slots against admission so reservations cannot over-admit", async () => {
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 2,
+        partitionResolver: (ctx) => ctx,
+        partitions: { a: { percent: 1.0, burstMode: { kind: "none" } } },
+      });
+      const saturatedState = { limit: 2, inflight: 2 };
+
+      const r1 = strategy.tryReserveAllotment("a", saturatedState);
+      const r2 = strategy.tryReserveAllotment("a", saturatedState);
+      assert.ok(r1);
+      assert.ok(r2);
+      assert.equal(
+        strategy.tryReserveAllotment("a", saturatedState),
+        undefined,
+        "third concurrent reservation must be rejected — reserved slots count against limit-at-saturation",
+      );
+
+      await r1.cancel();
+      assert.ok(
+        strategy.tryReserveAllotment("a", saturatedState),
+        "after a cancel, the freed slot is available again",
+      );
+    });
+
+    it("treats a cancelled reservation as a no-op for subsequent acquires", async () => {
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 1,
+        partitionResolver: (ctx) => ctx,
+        partitions: { a: { percent: 1.0, burstMode: { kind: "none" } } },
+      });
+      const saturatedState = { limit: 1, inflight: 1 };
+
+      const reservation = strategy.tryReserveAllotment("a", saturatedState);
+      assert.ok(reservation);
+      await reservation.cancel();
+
+      assert.equal(strategy.getPartition("a")?.inFlight, 0);
+      assert.equal(strategy.getPartition("a")?.reserved, 0);
+      assert.ok(
+        strategy.tryReserveAllotment("a", saturatedState),
+        "freed slot is available to a fresh reservation",
+      );
+    });
+
+    it("makes commit/cancel idempotent on a single reservation", async () => {
+      const { registry, inflightSamplesByPartition } = makeRecordingRegistry();
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 4,
+        partitionResolver: (ctx) => ctx,
+        partitions: { a: { percent: 1.0 } },
+        metricRegistry: registry,
+      });
+
+      const fakeState = { limit: 4, inflight: 0 };
+      const reservation = strategy.tryReserveAllotment("a", fakeState);
+      assert.ok(reservation);
+
+      await reservation.commit();
+      await reservation.commit();
+      await reservation.cancel();
+
+      assert.equal(strategy.getPartition("a")?.inFlight, 1);
+      assert.equal(strategy.getPartition("a")?.reserved, 0);
+      assert.deepEqual(
+        inflightSamplesByPartition.get("a"),
+        [1],
+        "duplicate commit/cancel calls must not emit additional samples or corrupt counts",
+      );
     });
   });
 });

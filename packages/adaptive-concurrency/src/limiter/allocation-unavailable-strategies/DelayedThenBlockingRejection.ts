@@ -1,8 +1,8 @@
-import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
-} from "../../Limiter.js";
+  LimitAllotment,
+} from "../../types/Strategy.js";
 import type { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 
 /**

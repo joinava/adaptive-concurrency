@@ -16,10 +16,11 @@ This library estimates and enforces concurrency limits at each point in the netw
 
 ## Packages
 
-| Package                      | Description                                                    |
-| ---------------------------- | -------------------------------------------------------------- |
-| `adaptive-concurrency`       | Core library with limit algorithms and limiter implementations |
-| `@adaptive-concurrency/http` | HTTP middleware for Express/Connect-compatible frameworks      |
+| Package                       | Description                                                                       |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| `adaptive-concurrency`        | Core library with limit algorithms and limiter implementations                    |
+| `@adaptive-concurrency/http`  | HTTP middleware for Express/Connect-compatible frameworks                         |
+| `@adaptive-concurrency/redis` | Redis-backed acquire strategies (e.g. distributed token-bucket rate limiting)     |
 
 ## Quick Start
 
@@ -43,7 +44,7 @@ See details on the [available limit types/strategies](#limit-algorithms).
 
 #### Using the Limiter
 
-For the common case—"run this work under the limit and record the right outcome"—use **`withLimiter(limiter)`** to create a **`limited`** helper. It acquires an allotment, invokes your callback, maps the result to the correct `LimitAllotment` method, and avoids leaking slots if the callback throws.
+For the common case—"run this work under the limit and record the right outcome"—use **`withLimiter(limiter)`** to create a **`limited`** helper. It acquires a `LimitAllotment`, invokes your callback, maps the result to the correct release method, and avoids leaking slots if the callback throws.
 
 ```typescript
 import {
@@ -219,10 +220,47 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 ## Limiter building blocks
 
 - **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**, and optional **`operationNameFor`** to tag samples for group-aware limits.
-- **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. Combine with `Limiter` via `acquireStrategy`.
-- **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function.
+- **`AcquireStrategy`** — Two-phase admission contract. `tryReserveAllotment(context, state)` returns an `AllotmentReservation` when capacity is tentatively reserved; the limiter then calls `commit()` when admission succeeds or `cancel()` when an outer decision rejects/aborts before the allotment is returned. This lets composed strategies reserve locally without emitting metrics or waking waiters until the overall acquire succeeds.
+- **`LimitAllotment`** — Handle returned from `Limiter.acquire()`. Call exactly one release method: `releaseAndRecordSuccess()`, `releaseAndIgnore()`, or `releaseAndRecordDropped()`.
+- **`AllotmentReservation`** — Helper class for implementing two-phase `AcquireStrategy` instances. Its `commit()` and `cancel()` methods are idempotent.
+- **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. It tracks speculative reservations separately from committed inflight work so cancelled reservations do not pollute partition metrics.
+- **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function. Enqueue-triggered drains are coalesced and only retry the queue head, avoiding lost wakeups without fanning out retries across the whole queue.
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
-- **`DelayedThenBlockingRejection`** — Two-stage behavior: uncoditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
+- **`DelayedThenBlockingRejection`** — Two-stage behavior: unconditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
+
+## Redis Token Bucket
+
+The optional `@adaptive-concurrency/redis` package provides a distributed token-bucket gate that can be composed with any core acquire strategy.
+
+```bash
+pnpm add adaptive-concurrency @adaptive-concurrency/redis
+```
+
+```typescript
+import { FixedLimit, Limiter, SemaphoreStrategy } from "adaptive-concurrency";
+import {
+  RedisTokenBucket,
+  RedisTokenBucketStrategy,
+} from "@adaptive-concurrency/redis";
+
+const localConcurrency = 50;
+const bucket = new RedisTokenBucket(redisClient, {
+  keyPrefix: "my-service:rate-limit",
+  maxTokens: 1_000,
+  refillIntervalMs: 60_000,
+});
+
+const limiter = new Limiter<{ tenant: string }>({
+  limit: new FixedLimit(localConcurrency),
+  acquireStrategy: new RedisTokenBucketStrategy({
+    bucket,
+    inner: new SemaphoreStrategy(localConcurrency),
+    keyResolver: (ctx) => ctx.tenant,
+  }),
+});
+```
+
+`RedisTokenBucketStrategy` consults its inner strategy first, then consumes a Redis token. If Redis denies, it cancels the inner reservation. If Redis is unavailable, the bucket fails open and invokes the optional `onError` callback for observability.
 
 ## Factory helpers
 

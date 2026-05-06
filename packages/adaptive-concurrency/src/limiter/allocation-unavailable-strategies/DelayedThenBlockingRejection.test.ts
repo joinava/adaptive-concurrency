@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { LimitAllotment } from "../../LimitAllotment.js";
 import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
+  LimitAllotment,
 } from "../../Limiter.js";
 import { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 import { DelayedThenBlockingRejection } from "./DelayedThenBlockingRejection.js";

@@ -1,19 +1,20 @@
 // Core interfaces and Limiter
 export type { AdaptiveLimit } from "./limit/StreamingLimit.js";
-export type { LimitAllotment } from "./LimitAllotment.js";
+export { Limiter, type LimiterOptions } from "./Limiter.js";
 export {
-  Limiter,
   withLimiter,
-  type AcquireOptions,
-  type AcquireResult,
-  type AcquireStrategy,
-  type AllotmentUnavailableStrategy,
   type LimitedFunction,
-  type LimiterOptions,
-  type LimiterState,
-  type MaybePromise,
   type RunCallbackArgs,
-} from "./Limiter.js";
+} from "./withLimiter.js";
+export type {
+  AcquireOptions,
+  AcquireResult,
+  AcquireStrategy,
+  AllotmentUnavailableStrategy,
+  LimitAllotment,
+  LimiterState,
+  MaybePromise,
+} from "./types/index.js";
 export { ListenerSet } from "./ListenerSet.js";
 export {
   MetricIds,
@@ -66,6 +67,9 @@ export type { StreamingStatistic } from "./statistics/StreamingStatistic.js";
 export { makeAverageSampleWindow } from "./limit/window/AverageSampleWindow.js";
 export { createPercentileSampleWindow } from "./limit/window/PercentileSampleWindow.js";
 export type { SampleWindow } from "./limit/window/SampleWindow.js";
+
+// Runtime utils/classes
+export { AllotmentReservation } from "./AllotmentReservation.js";
 
 export {
   LinkedWaiterQueue,
