@@ -32,6 +32,19 @@ export interface AIMDLimitOptions {
    * Must be in [0, 0.05]. Default: 0.02.
    */
   backoffJitter?: number;
+
+  /**
+   * Configuration for the limiter's recovery probe when the limit reaches 0.
+   * See {@link AdaptiveLimit.probeFromZeroInterval}.
+   */
+  recoveryProbe?: {
+    /**
+     * Base interval in milliseconds between probes. The probe interval grows
+     * as `baseMs * 2^failedProbes`, then is jittered and capped by the
+     * limiter. Default: the configured `timeout`.
+     */
+    baseMs?: number;
+  };
 }
 
 export class AIMDLimit implements AdaptiveLimit {
@@ -43,6 +56,7 @@ export class AIMDLimit implements AdaptiveLimit {
   private readonly minLimit: number;
   private readonly maxLimit: number;
   private readonly backoffJitter: number;
+  private readonly recoveryProbeBaseMs: number;
 
   constructor(options: AIMDLimitOptions = {}) {
     const initialLimit = options.initialLimit ?? 20;
@@ -53,21 +67,33 @@ export class AIMDLimit implements AdaptiveLimit {
     this.minLimit = options.minLimit ?? 20;
     this.maxLimit = options.maxLimit ?? 200;
     this.backoffJitter = options.backoffJitter ?? 0.02;
+    this.recoveryProbeBaseMs = options.recoveryProbe?.baseMs ?? this.timeout;
 
     if (this.backoffRatio >= 1.0 || this.backoffRatio < 0.5) {
-      throw new Error("Backoff ratio must be in the range [0.5, 1.0)");
+      throw new RangeError("Backoff ratio must be in the range [0.5, 1.0)");
     }
     if (this.timeout <= 0) {
-      throw new Error("Timeout must be positive");
+      throw new RangeError("Timeout must be positive");
     }
     if (this.backoffJitter < 0 || this.backoffJitter > 0.05) {
-      throw new Error("backoffJitter must be in the range [0, 0.05]");
+      throw new RangeError("backoffJitter must be in the range [0, 0.05]");
     }
     if (this.backoffRatio + this.backoffJitter >= 1.0) {
-      throw new Error(
+      throw new RangeError(
         "backoffRatio + backoffJitter must be < 1.0 to guarantee the limit decreases on drop",
       );
     }
+    if (!(this.recoveryProbeBaseMs > 0)) {
+      throw new RangeError("recoveryProbe.baseMs must be > 0");
+    }
+  }
+
+  probeFromZeroInterval(failedProbes: number): number {
+    return this.recoveryProbeBaseMs * Math.pow(2, failedProbes);
+  }
+
+  applyProbeFromZero(): void {
+    this.applyNewLimit(1);
   }
 
   addSample(

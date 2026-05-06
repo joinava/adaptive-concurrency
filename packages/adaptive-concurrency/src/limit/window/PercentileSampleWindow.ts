@@ -106,7 +106,7 @@ export function createPercentileSampleWindow(
   windowSize: number,
 ): ImmutablePercentileSampleWindow {
   if (percentile <= 0 || percentile >= 1) {
-    throw new Error("Percentile should belong to (0, 1.0)");
+    throw new RangeError("Percentile should belong to (0, 1.0)");
   }
 
   return new ImmutablePercentileSampleWindow({ percentile, windowSize });

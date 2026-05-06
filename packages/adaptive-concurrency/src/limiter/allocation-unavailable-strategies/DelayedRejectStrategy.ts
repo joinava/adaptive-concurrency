@@ -37,7 +37,7 @@ export class DelayedRejectStrategy<
     this.delayMsForContext = options.delayMsForContext;
     const max = options.maxConcurrentDelays ?? 100;
     if (max < 1 || !Number.isFinite(max)) {
-      throw new Error("maxConcurrentDelays must be a finite number >= 1");
+      throw new RangeError("maxConcurrentDelays must be a finite number >= 1");
     }
     this.maxConcurrentDelays = max;
   }

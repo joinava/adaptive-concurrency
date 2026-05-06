@@ -76,7 +76,10 @@ describe("AIMDLimit", () => {
     for (let i = 0; i < 20; i++) {
       limit.addSample(0, 1, limit.currentLimit, true);
     }
-    assert.ok(limit.currentLimit >= 10, `Limit ${limit.currentLimit} should not be below minLimit 10`);
+    assert.ok(
+      limit.currentLimit >= 10,
+      `Limit ${limit.currentLimit} should not be below minLimit 10`,
+    );
   });
 
   it("should respect maxLimit", () => {
@@ -88,7 +91,10 @@ describe("AIMDLimit", () => {
     for (let i = 0; i < 100; i++) {
       limit.addSample(0, 1, limit.currentLimit, false);
     }
-    assert.ok(limit.currentLimit <= 30, `Limit ${limit.currentLimit} should not exceed maxLimit 30`);
+    assert.ok(
+      limit.currentLimit <= 30,
+      `Limit ${limit.currentLimit} should not exceed maxLimit 30`,
+    );
   });
 
   it("should throw on invalid backoffRatio", () => {
@@ -124,5 +130,45 @@ describe("AIMDLimit", () => {
     const limit = new AIMDLimit({ initialLimit: 25 });
     assert.ok(limit.toString().includes("AIMDLimit"));
     assert.ok(limit.toString().includes("25"));
+  });
+
+  describe("recovery probe", () => {
+    it("defaults probeFromZeroInterval base to the configured timeout + applies exponential backoff", () => {
+      const limit = new AIMDLimit({ timeout: 2_500 });
+      assert.equal(limit.probeFromZeroInterval(0), 2_500);
+      assert.equal(limit.probeFromZeroInterval(1), 5_000);
+      assert.equal(limit.probeFromZeroInterval(3), 20_000);
+    });
+
+    it("uses the explicit recoveryProbe.baseMs when provided", () => {
+      const limit = new AIMDLimit({
+        timeout: 5_000,
+        recoveryProbe: { baseMs: 250 },
+      });
+      assert.equal(limit.probeFromZeroInterval(0), 250);
+      assert.equal(limit.probeFromZeroInterval(2), 1_000);
+    });
+
+    it("applyProbeFromZero raises the limit to 1 and notifies subscribers", () => {
+      const limit = new AIMDLimit({
+        initialLimit: 0,
+        minLimit: 0,
+        maxLimit: 100,
+      });
+      const seen: number[] = [];
+      limit.subscribe((n) => seen.push(n));
+
+      limit.applyProbeFromZero();
+
+      assert.equal(limit.currentLimit, 1);
+      assert.deepEqual(seen, [1]);
+    });
+
+    it("rejects non-positive recoveryProbe.baseMs", () => {
+      assert.throws(
+        () => new AIMDLimit({ recoveryProbe: { baseMs: 0 } }),
+        /recoveryProbe\.baseMs must be > 0/,
+      );
+    });
   });
 });
