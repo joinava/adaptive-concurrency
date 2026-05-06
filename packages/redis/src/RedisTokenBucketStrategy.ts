@@ -128,7 +128,7 @@ export class RedisTokenBucketStrategy<ContextT> {
       try {
         await reservation.cancel();
       } catch (error) {
-        this.#fireReservationError({ context, phase: "cancel", error });
+        await this.#fireReservationError({ context, phase: "cancel", error });
       }
       return undefined;
     }
@@ -154,7 +154,7 @@ export class RedisTokenBucketStrategy<ContextT> {
           // from either can't shadow `error` — the inner-commit failure is what
           // the caller asked us to surface and we must guarantee it propagates.
           await this.#refundQuietly(key);
-          this.#fireReservationError({ context, phase: "commit", error });
+          await this.#fireReservationError({ context, phase: "commit", error });
           throw error;
         }
       },
@@ -162,7 +162,7 @@ export class RedisTokenBucketStrategy<ContextT> {
         try {
           await reservation.cancel();
         } catch (error) {
-          this.#fireReservationError({ context, phase: "cancel", error });
+          await this.#fireReservationError({ context, phase: "cancel", error });
         }
         await this.#refundQuietly(key);
       },
