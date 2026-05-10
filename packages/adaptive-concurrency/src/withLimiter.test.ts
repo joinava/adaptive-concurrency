@@ -105,6 +105,29 @@ describe("withLimiter", () => {
         e.message.includes("Unexpected value") &&
         e.message.includes('"kind":"dropped"'),
     );
+
+    assert.ok(await limiter.acquire({ context: "a" }));
+  });
+
+  it("rejects misuse when callback throws success result and releases slot", async () => {
+    const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
+    const limited = withLimiter(limiter);
+
+    await assert.rejects(
+      (
+        limited as unknown as (
+          options: { context: string },
+          fn: () => unknown,
+        ) => Promise<unknown>
+      )({ context: "a" }, () => {
+        throw success("not-an-error");
+      }),
+      (e: unknown) =>
+        e instanceof Error &&
+        e.message.includes("do not throw success(value)"),
+    );
+
+    assert.ok(await limiter.acquire({ context: "a" }));
   });
 
   it("reports ignore and rethrows on unknown callback throw", async () => {
@@ -296,6 +319,24 @@ describe("makeLimitedFunction", () => {
     });
 
     await assert.rejects(limited({ context: "a" }), (e: unknown) => e === err);
+    assert.ok(await limiter.acquire({ context: "a" }));
+  });
+
+  it("rejects misuse when bound callback returns dropped result and releases slot", async () => {
+    const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
+    const limited = makeLimitedFunction(
+      limiter,
+      (() => dropped(new Error("overload"))) as unknown as () => string,
+    );
+
+    await assert.rejects(
+      limited({ context: "a" }),
+      (e: unknown) =>
+        e instanceof Error &&
+        e.message.includes("Unexpected value") &&
+        e.message.includes('"kind":"dropped"'),
+    );
+
     assert.ok(await limiter.acquire({ context: "a" }));
   });
 });

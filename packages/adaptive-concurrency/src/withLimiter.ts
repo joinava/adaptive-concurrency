@@ -1,3 +1,5 @@
+import type { IsEqual } from "type-fest";
+import type { Satisfies } from "type-party";
 import type { Limiter } from "./Limiter.js";
 import {
   isAdaptiveDropError,
@@ -17,6 +19,10 @@ export type RunCallbackArgs<ContextT> = {
 };
 
 type ReturnableRunResult<T> = RunSuccess<T> | RunIgnore<T>;
+
+type AllotmentOutcome<T> =
+  | { kind: "return"; value: T; finalizeMode: "success" | "ignore" }
+  | { kind: "throw"; value: unknown; finalizeMode: "ignore" | "drop" };
 
 type FunctionToLimit<ContextT, T> = (
   args: RunCallbackArgs<ContextT>,
@@ -75,65 +81,95 @@ export function withLimiter<ContextT>(
       return QuotaNotAvailable;
     }
 
-    const [result] = await Promise.allSettled([
-      Promise.resolve().then(() =>
-        fn({ context: options?.context, signal: options?.signal }),
-      ),
-    ]);
+    try {
+      const allotmentOutcome = await Promise.resolve()
+        .then(async (): Promise<AllotmentOutcome<T>> => {
+          const res = await fn({
+            context: options?.context,
+            signal: options?.signal,
+          });
 
-    if (result.status === "rejected") {
-      const [finalizeAllotment, toThrow] = (() => {
-        if (isRunResult(result.reason)) {
-          const reason = result.reason as RunResult<unknown, Error>;
-          switch (reason.kind) {
-            case "dropped":
-              return [allotment.releaseAndRecordDropped, reason.error] as const;
-            case "ignore":
-              return [allotment.releaseAndIgnore, reason.value] as const;
-            case "success":
-              return [
-                allotment.releaseAndIgnore,
-                new Error(
-                  `Unexpected throw success() value: ${JSON.stringify(reason)}`,
-                ),
-              ] as const;
-            default:
-              assertUnreachable(reason);
+          if (!isRunResult(res)) {
+            return { kind: "return", value: res, finalizeMode: "success" };
           }
-        }
 
-        return [
-          isAdaptiveDropError(result.reason)
-            ? allotment.releaseAndRecordDropped
-            : allotment.releaseAndIgnore,
-          result.reason,
-        ] as const;
-      })();
+          const cast = res satisfies
+            | Awaited<T>
+            | ReturnableRunResult<T> as ReturnableRunResult<T>;
 
-      await finalizeAllotment.call(allotment);
-      throw toThrow;
-    }
+          switch (cast.kind) {
+            case "success":
+            case "ignore":
+              return {
+                kind: "return",
+                value: cast.value,
+                finalizeMode: cast.kind,
+              };
+            default:
+              assertUnreachable(cast);
+          }
+        })
+        .catch(async (reason): Promise<AllotmentOutcome<T>> => {
+          if (!isRunResult(reason)) {
+            return {
+              kind: "throw",
+              value: reason,
+              finalizeMode: isAdaptiveDropError(reason) ? "drop" : "ignore",
+            };
+          }
 
-    const outcome = result.value;
-    if (!isRunResult(outcome)) {
-      await allotment.releaseAndRecordSuccess();
-      return outcome;
-    }
+          const runResultReason = reason as RunResult<unknown, Error>;
+          switch (runResultReason.kind) {
+            case "dropped":
+              return {
+                kind: "throw",
+                value: runResultReason.error,
+                finalizeMode: "drop",
+              };
+            case "ignore":
+              return {
+                kind: "throw",
+                value: runResultReason.value,
+                finalizeMode: "ignore",
+              };
+            case "success":
+              throw new Error(
+                `Invalid callback throw: do not throw success(value); throw err, dropped(err) or ignore(err) instead.`,
+              );
+            default:
+              assertUnreachable(runResultReason);
+          }
+        });
 
-    const outcomeCast = outcome satisfies
-      | Awaited<T>
-      | ReturnableRunResult<T> as ReturnableRunResult<T>;
-
-    switch (outcomeCast.kind) {
-      case "success":
-        await allotment.releaseAndRecordSuccess();
-        return outcomeCast.value;
-      case "ignore":
-        await allotment.releaseAndIgnore();
-        return outcomeCast.value;
-      default:
-        await allotment.releaseAndIgnore();
-        assertUnreachable(outcomeCast as never);
+      switch (allotmentOutcome.finalizeMode) {
+        case "success":
+          await allotment.releaseAndRecordSuccess();
+          type _ = Satisfies<
+            IsEqual<typeof allotmentOutcome.kind, "return">,
+            true
+          >;
+          return allotmentOutcome.value;
+        case "ignore":
+          await allotment.releaseAndIgnore();
+          if (allotmentOutcome.kind === "throw") {
+            throw allotmentOutcome.value;
+          } else {
+            return allotmentOutcome.value;
+          }
+        case "drop":
+          await allotment.releaseAndRecordDropped();
+          type _2 = Satisfies<
+            IsEqual<typeof allotmentOutcome.kind, "throw">,
+            true
+          >;
+          throw allotmentOutcome.value;
+        default:
+          assertUnreachable(allotmentOutcome);
+      }
+    } finally {
+      // Catches the throws from unexpected branches above to make sure the
+      // allotment is always released.
+      await allotment.releaseAndIgnore();
     }
   }
 
