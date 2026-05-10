@@ -91,9 +91,12 @@ export function withLimiter<ContextT>(
             case "ignore":
               return [allotment.releaseAndIgnore, reason.value] as const;
             case "success":
-              throw new Error(
-                `Unexpected throw success() value: ${JSON.stringify(reason)}`,
-              );
+              return [
+                allotment.releaseAndIgnore,
+                new Error(
+                  `Unexpected throw success() value: ${JSON.stringify(reason)}`,
+                ),
+              ] as const;
             default:
               assertUnreachable(reason);
           }
@@ -129,7 +132,8 @@ export function withLimiter<ContextT>(
         await allotment.releaseAndIgnore();
         return outcomeCast.value;
       default:
-        assertUnreachable(outcomeCast);
+        await allotment.releaseAndIgnore();
+        assertUnreachable(outcomeCast as never);
     }
   }
 

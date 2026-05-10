@@ -11,9 +11,11 @@ export {
   type MetricRegistry,
 } from "./MetricRegistry.js";
 export {
+  AdaptiveRejectionError,
   AdaptiveTimeoutError,
   dropped,
   ignore,
+  isAdaptiveDropError,
   isAdaptiveTimeoutError,
   isRunResult,
   QuotaNotAvailable,
