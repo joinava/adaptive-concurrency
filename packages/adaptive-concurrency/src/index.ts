@@ -1,20 +1,6 @@
 // Core interfaces and Limiter
 export type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 export { Limiter, type LimiterOptions } from "./Limiter.js";
-export {
-  withLimiter,
-  type LimitedFunction,
-  type RunCallbackArgs,
-} from "./withLimiter.js";
-export type {
-  AcquireOptions,
-  AcquireResult,
-  AcquireStrategy,
-  AllotmentUnavailableStrategy,
-  LimitAllotment,
-  LimiterState,
-  MaybePromise,
-} from "./types/index.js";
 export { ListenerSet } from "./ListenerSet.js";
 export {
   MetricIds,
@@ -37,6 +23,21 @@ export {
   type RunResult,
   type RunSuccess,
 } from "./RunResult.js";
+export type {
+  AcquireOptions,
+  AcquireResult,
+  AcquireStrategy,
+  AllotmentUnavailableStrategy,
+  LimitAllotment,
+  LimiterState,
+  MaybePromise,
+} from "./types/index.js";
+export {
+  makeLimitedFunction,
+  withLimiter,
+  type CallWithLimiter,
+  type RunCallbackArgs,
+} from "./withLimiter.js";
 
 // Limit algorithms
 export { AIMDLimit, type AIMDLimitOptions } from "./limit/AIMDLimit.js";

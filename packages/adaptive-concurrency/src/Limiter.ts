@@ -27,8 +27,9 @@ export type {
   LimiterState,
 } from "./types/Strategy.js";
 export {
+  makeLimitedFunction,
   withLimiter,
-  type LimitedFunction,
+  type CallWithLimiter,
   type RunCallbackArgs,
 } from "./withLimiter.js";
 

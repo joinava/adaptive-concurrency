@@ -129,10 +129,10 @@ No Java equivalent. TypeScript `LimiterOptions` accepts an optional `operationNa
 No direct Java equivalent.
 
 - `withLimiter(limiter)` creates `limited`, then call `limited(fn)` or `limited(options, fn)` to acquire and scope execution.
-- Callback returns `RunResult`: `success(value)`, `ignore(value)`, or `dropped(error)`.
+- Callback returns `RunResult` `success(value)`/`ignore(value)`, and dropped outcomes are signaled by throwing `dropped(error)`. Throwing an unwrapped error is shorthand for throwing `ignore(error)`.
 - If no allotment is available, returns `QuotaNotAvailable` and does not invoke `fn`.
 - Callback receives `{ context, signal }` from `AcquireOptions`.
-- If `fn` throws/rejects unexpectedly, `limited()` calls `releaseAndIgnore()` and rethrows, except `AdaptiveTimeoutError`, which is treated as dropped (`releaseAndRecordDropped()`) and rethrown.
+- If `fn` throws/rejects unexpectedly, `limited()` calls `releaseAndIgnore()` and rethrows, except `AdaptiveTimeoutError` and `AdaptiveRejectionError`, which are treated as dropped (`releaseAndRecordDropped()`) and rethrown.
 
 ### Other TS-only helpers/types
 
@@ -295,7 +295,7 @@ Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now.
 
 - Java `execute(Runnable)` style maps to wrapping your async work in `withLimiter(limiter)`.
 - Acquire failures are represented by `QuotaNotAvailable` (instead of executor-specific rejection exceptions).
-- Drop signaling can be done via `dropped(err)` return values, or by throwing `AdaptiveTimeoutError`.
+- Drop signaling can be done by throwing `dropped(err)` or by throwing `AdaptiveTimeoutError`. Non-drop throws are ignore semantics (equivalent to throwing `ignore(err)`).
 - No JVM thread-pool abstraction is provided in core TypeScript APIs.
 
 ---

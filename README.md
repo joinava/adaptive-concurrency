@@ -44,25 +44,22 @@ See details on the [available limit types/strategies](#limit-algorithms).
 
 #### Using the Limiter
 
-For the common case—"run this work under the limit and record the right outcome"—use **`withLimiter(limiter)`** to create a **`limited`** helper. It acquires a `LimitAllotment`, invokes your callback, maps the result to the correct release method, and avoids leaking slots if the callback throws.
+For the common case—"run some work subject to/using the limit and record the right outcome"—use **`makeLimitedFunction(limiter, fn)`** to create a **`callWithLimiter`** helper for a specific callback.
 
 ```typescript
 import {
   Limiter,
   VegasLimit,
   QuotaNotAvailable,
-  AdaptiveTimeoutError,
-  withLimiter,
+  makeLimitedFunction,
   success,
   ignore,
   dropped,
 } from "adaptive-concurrency";
 
 const limiter = new Limiter<string>({ limit: new VegasLimit() });
-const limited = withLimiter(limiter);
-
-const out = await limited(
-  { context: "tenant-a" },
+const callWithLimiter = makeLimitedFunction(
+  limiter,
   async ({ context, signal }) => {
     try {
       const data = await fetchData({ context, signal });
@@ -73,82 +70,58 @@ const out = await limited(
       return success(data);
     } catch (e) {
       // detect 429 or anything else indicating that your request was dropped
-      // (i.e., subject to load shedding). If you see such shedding, you MUST
-      // inform the limiter by returning dropped(e);
-      if (isRateLimitError) {
-        return dropped(e);
+      // (i.e., subject to load shedding), or hit a timeout that you interpret 
+      // as a signal that the backend is overloaded. If you see such overload,
+      // you MUST inform the limiter by throwing dropped(e) so it'll reduce
+      // the limit.
+      if (isRateLimitError || didTimeOutOrLoadShed) {
+        throw dropped(e);
       }
 
-      // Or throw AdaptiveTimeoutError to signal dropped semantics.
-      if (didTimeOutOrLoadShed) {
-        throw new AdaptiveTimeoutError("request timed out");
-      }
-
-      // Otherwise, for any unexpected errors that mean that the operation might
-      // have failed midway through, and therefore the round-trip time isn't
-      // representative/usable for computing the concurrency limit, you can simply
-      // rethrow.
-      throw e;
+      // Otherwise, treat as ignored failure: this round-trip time isn't
+      // representative/usable for computing the concurrency limit.
+      // `throw e` is equivalent to `throw ignore(e)`.
+      throw ignore(e);
     }
   },
 );
 
-if (out === QuotaNotAvailable) {
-  // No allotment: callback was not run (rejected, timed out, aborted, etc.)
-} else {
-  // `out` is the value inside `success` / `ignore`
-}
-```
+try {
+  // Options argument is optional here; is passed as options to acquire().
+  const result = await callWithLimiter({ context: "tenant-a" });
 
-**Signatures**
-
-- `limited(fn)` — void context.
-- `limited(options, fn)` — same options as `acquire` (`context`, `signal`).
-- Callback args are `{ context, signal }` from `AcquireOptions`.
-
-**Callback return type (`RunResult`)**
-
-Build values with the helpers **`success(value)`**, **`ignore(value)`**, and **`dropped(error)`**. Callers should always use these helper functions rather than constructing `RunResult` objects directly.
-
-If your callback returns any value that is **not** a valid `RunResult`, `withLimiter(...)` treats it as an implicit success (calls `releaseAndRecordSuccess()`) and resolves with that value.
-
-| Result         | Effect                                                                                   |
-| -------------- | ---------------------------------------------------------------------------------------- |
-| `success(v)`   | `releaseAndRecordSuccess()`, limit algorithm gets an RTT sample; **`limited` resolves with `v`**.  |
-| `ignore(v)`    | `releaseAndIgnore()`, no RTT sample; **`limited` resolves with `v`**.                        |
-| `dropped(err)` | `releaseAndRecordDropped()`, overload-style signal to the limit; **`limited` rejects with `err`**. |
-
-**`QuotaNotAvailable`**
-
-If `acquire` yields no allotment, **`limited` returns the sentinel `QuotaNotAvailable`** and does **not** call `fn`. Compare with `=== QuotaNotAvailable` (it is a `Symbol`).
-
-**Errors thrown from `fn`**
-
-If the callback **rejects** or **throws** before returning a `RunResult`, the allotment is completed with **`releaseAndIgnore()`**, and the error is **rethrown**. The one exception is **`AdaptiveTimeoutError`**, which is treated as a drop (`releaseAndRecordDropped()`) and then rethrown. Use `dropped(yourError)` or throw `AdaptiveTimeoutError` when the outcome should count as a **drop** for adaptive limiting.
-
-#### Advanced Usage with `acquire`
-
-Acquire is a lower-level API that's not as safe, as you MUST be sure to call `releaseAndRecordSuccess()`, `releaseAndRecordDropped()` or `releaseAndIgnore()` when the operation is complete.
-
-```typescript
-const allotment = await limiter.acquire({ context: "tenant-a" });
-if (allotment) {
-  try {
-    await doWork();
-    await allotment.releaseAndRecordSuccess();
-  } catch {
-    await allotment.releaseAndRecordDropped();
+  if (result === QuotaNotAvailable) {
+    // Callback was not run because calls to the downstream were already
+    // at the max concurrency (and the limiter wasn't set up to queue further
+    // acquire calls)
+  } else {
+    // `result` is the value inside `success` / `ignore`
   }
-} else {
-  // No allotment right now
+} catch (e) {
+  // handle the error the callback threw, if any.
 }
 ```
 
-To use it, pass **`AcquireOptions`**: `{ context }` when the limiter is keyed by context, `{ signal }` for `AbortSignal`, or omit/`{}` for a void context.
+##### Callback contract (`makeLimitedFunction`)
 
-`acquire` returns **`Promise<LimitAllotment | undefined>`** and should be awaited directly.
+`makeLimitedFunction(limiter, fn)` returns `callWithLimiter(options?)`. The callback `fn` receives `{ context, signal }` and drives limiter bookkeeping via what it returns or throws:
 
-Use **`acquire` + `LimitAllotment`** when you need a separate acquire and release (framework hooks, streaming lifetimes, handoff to another owner). Use **`withLimiter(limiter)`** when a single async scope is enough.
+| Callback behavior | Limiter bookkeeping | `callWithLimiter` outcome |
+| ----------------- | ------------------- | ------------------------- |
+| `return success(v)` or `return v` | `releaseAndRecordSuccess()` | resolves with `v` |
+| `return ignore(v)` | `releaseAndIgnore()` | resolves with `v` |
+| `throw dropped(err)` | `releaseAndRecordDropped()` | rejects with `err` |
+| `throw AdaptiveTimeoutError` / `throw AdaptiveRejectionError` | `releaseAndRecordDropped()` | rejects with the same error |
+| `throw ignore(err)` or `throw err` | `releaseAndIgnore()` | rejects with `err` |
+
+Notes:
+
+- Returning a non-`RunResult` value is shorthand for `return success(value)`.
+- Throwing a non-`RunResult` error is shorthand for `throw ignore(error)`.
+- Returning `dropped(error)` is invalid; use `throw dropped(error)` for drop semantics.
+- If `acquire` yields no allotment, `callWithLimiter` returns `QuotaNotAvailable` and does not call `fn` (compare with `=== QuotaNotAvailable`).
+
+For advanced usage patterns—including `withLimiter(limiter)` and direct `acquire` flows—see [Advanced usage patterns](./docs/ADVANCED_USAGE_PATTERNS.md).
 
 ### HTTP Middleware
 
