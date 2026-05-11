@@ -10,7 +10,7 @@ const ADAPTIVE_REJECTION_ERROR_CODE = "ADAPTIVE_REJECTION" as const;
 export const QuotaNotAvailable = Symbol("QuotaNotAvailable");
 
 /**
- * Error type that signals the operation timeed out. When thrown by the callback
+ * Error type that signals the operation timed out. When thrown by the callback
  * given to a {@link CallWithLimiter}, the result is treated as a drop (calls
  * `releaseAndRecordDropped`) and then rethrown.
  */
