@@ -75,7 +75,8 @@ const callWithLimiter = makeLimitedFunction(
       // you MUST inform the limiter by throwing dropped(e) so it'll reduce
       // the limit.
       if (isRateLimitError || didTimeOutOrLoadShed) {
-        throw dropped(e);
+        const error = e instanceof Error ? e : new Error(String(e));
+        throw dropped(error);
       }
 
       // Otherwise, treat as ignored failure: this round-trip time isn't
