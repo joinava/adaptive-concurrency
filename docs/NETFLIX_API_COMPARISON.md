@@ -295,7 +295,7 @@ Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now.
 
 - Java `execute(Runnable)` style maps to wrapping your async work in `withLimiter(limiter)`.
 - Acquire failures are represented by `QuotaNotAvailable` (instead of executor-specific rejection exceptions).
-- Drop signaling can be done by throwing `dropped(err)` or by throwing `AdaptiveTimeoutError`. Non-drop throws are ignore semantics (equivalent to throwing `ignore(err)`).
+- Drop signaling can be done by throwing `dropped(err)` or by throwing `AdaptiveTimeoutError` or `AdaptiveRejectionError`. Non-drop throws are ignore semantics (equivalent to throwing `ignore(err)`).
 - No JVM thread-pool abstraction is provided in core TypeScript APIs.
 
 ---
