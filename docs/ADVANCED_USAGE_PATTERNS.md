@@ -31,13 +31,15 @@ const result = await callWithLimiter(
       // `ignore(data)` instead.
       return success(data);
     } catch (e) {
+      const error = e instanceof Error ? e : new Error(String(e));
+
       // detect 429 or anything else indicating that your request was dropped
       // (i.e., subject to load shedding), or any timeout that you interpret
       // as a signal that the backend is overloaded. If you see such overload,
-      // you MUST inform the limiter by throwing dropped(e) so it'll reduce
+      // you MUST inform the limiter by throwing dropped(error) so it'll reduce
       // the limit.
       if (isRateLimitError || didTimeOutOrLoadShed) {
-        throw dropped(e);
+        throw dropped(error);
       }
 
       // Otherwise, treat as ignored failure: this round-trip time isn't
