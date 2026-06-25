@@ -151,6 +151,17 @@ export type RedisTokenBucketConfig = {
    * be able to break the bucket's "always degrades gracefully" contract.
    */
   onError?: (info: { keyPrefix: string; key: string; error: unknown }) => void;
+  /**
+   * Source of the current time, in epoch milliseconds, passed to the acquire
+   * script as `nowMs`. Defaults to `Date.now`.
+   *
+   * This MUST be a wall-clock source (not a monotonic one like
+   * `performance.now`): the bucket is shared across processes, so every
+   * participant has to agree on what "now" means for the refill math to line
+   * up. The seam exists primarily so tests can drive refill/wait-time logic
+   * deterministically.
+   */
+  clock?: () => number;
 };
 
 export type AcquireResult =
@@ -159,6 +170,7 @@ export type AcquireResult =
 
 export class RedisTokenBucket {
   readonly #config: RedisTokenBucketConfig;
+  readonly #clock: () => number;
   readonly #acquireTokenScript: RedisScript<[number, number]>;
   readonly #refundTokenScript: RedisScript<number>;
 
@@ -178,6 +190,7 @@ export class RedisTokenBucket {
     }
 
     this.#config = config;
+    this.#clock = config.clock ?? Date.now;
     this.#acquireTokenScript = new RedisScript(redisClient, TOKEN_BUCKET_LUA);
     this.#refundTokenScript = new RedisScript(
       redisClient,
@@ -198,7 +211,7 @@ export class RedisTokenBucket {
         arguments: [
           String(this.#config.maxTokens),
           String(this.#config.refillIntervalMs),
-          String(Date.now()),
+          String(this.#clock()),
         ],
       });
 

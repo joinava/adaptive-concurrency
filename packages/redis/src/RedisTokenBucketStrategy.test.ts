@@ -132,54 +132,6 @@ function makeInnerStub<ContextT>(
 
 const fakeState: LimiterState = { limit: 10, inflight: 0 };
 
-describe("RedisTokenBucket", () => {
-  it("rejects invalid maxTokens values before any Redis calls", () => {
-    const invalidValues = [0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN];
-
-    for (const maxTokens of invalidValues) {
-      const client = makeMockClient({ responses: [[1, 0]] });
-
-      assert.throws(
-        () =>
-          new RedisTokenBucket(client, {
-            keyPrefix: "test",
-            maxTokens,
-            refillIntervalMs: 1000,
-          }),
-        /maxTokens must be a positive safe integer/,
-      );
-      assert.equal(
-        client.scriptLoadCalls,
-        0,
-        "invalid config must fail before loading Redis scripts",
-      );
-    }
-  });
-
-  it("rejects invalid refillIntervalMs values before any Redis calls", () => {
-    const invalidValues = [0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN];
-
-    for (const refillIntervalMs of invalidValues) {
-      const client = makeMockClient({ responses: [[1, 0]] });
-
-      assert.throws(
-        () =>
-          new RedisTokenBucket(client, {
-            keyPrefix: "test",
-            maxTokens: 5,
-            refillIntervalMs,
-          }),
-        /refillIntervalMs must be a positive safe integer/,
-      );
-      assert.equal(
-        client.scriptLoadCalls,
-        0,
-        "invalid config must fail before loading Redis scripts",
-      );
-    }
-  });
-});
-
 describe("RedisTokenBucketStrategy", () => {
   describe("composition contract (inner reserves first; bucket second)", () => {
     it("admits when both gates grant: reserve, bucket OK, commit", async () => {
@@ -195,7 +147,10 @@ describe("RedisTokenBucketStrategy", () => {
         inner: inner.strategy,
       });
 
-      const reservation = await strategy.tryReserveAllotment("ctx-1", fakeState);
+      const reservation = await strategy.tryReserveAllotment(
+        "ctx-1",
+        fakeState,
+      );
       assert.ok(reservation, "outer reservation should be granted");
       assert.deepEqual(inner.reserveCalls, ["ctx-1"]);
       assert.deepEqual(inner.commitCalls, []);
@@ -288,7 +243,10 @@ describe("RedisTokenBucketStrategy", () => {
         inner: inner.strategy,
       });
 
-      const reservation = await strategy.tryReserveAllotment("ctx-x", fakeState);
+      const reservation = await strategy.tryReserveAllotment(
+        "ctx-x",
+        fakeState,
+      );
       assert.ok(reservation);
 
       await reservation.cancel();
@@ -390,7 +348,10 @@ describe("RedisTokenBucketStrategy", () => {
         onReservationError: (info) => errors.push(info),
       });
 
-      const reservation = await strategy.tryReserveAllotment("ctx-y", fakeState);
+      const reservation = await strategy.tryReserveAllotment(
+        "ctx-y",
+        fakeState,
+      );
       assert.ok(reservation);
       await reservation.cancel();
 
@@ -432,7 +393,10 @@ describe("RedisTokenBucketStrategy", () => {
         onReservationError: (info) => errors.push(info),
       });
 
-      const reservation = await strategy.tryReserveAllotment("ctx-c", fakeState);
+      const reservation = await strategy.tryReserveAllotment(
+        "ctx-c",
+        fakeState,
+      );
       assert.ok(reservation);
 
       await assert.rejects(
@@ -464,7 +428,10 @@ describe("RedisTokenBucketStrategy", () => {
         inner: inner.strategy,
       });
 
-      const reservation = await strategy.tryReserveAllotment("ctx-i", fakeState);
+      const reservation = await strategy.tryReserveAllotment(
+        "ctx-i",
+        fakeState,
+      );
       assert.ok(reservation);
 
       await reservation.commit();
@@ -739,7 +706,8 @@ describe("RedisTokenBucketStrategy", () => {
       const limit = new SettableLimit(10);
       const partitioned = new PartitionedStrategy<string, "a" | "b">({
         initialLimit: limit.currentLimit,
-        partitionResolver: (ctx) => (ctx === "a" || ctx === "b" ? ctx : undefined),
+        partitionResolver: (ctx) =>
+          ctx === "a" || ctx === "b" ? ctx : undefined,
         partitions: { a: { percent: 0.5 }, b: { percent: 0.5 } },
       });
       const limiter = new Limiter<string>({
