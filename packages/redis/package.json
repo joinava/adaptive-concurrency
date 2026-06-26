@@ -1,7 +1,7 @@
 {
   "name": "@adaptive-concurrency/redis",
   "description": "Redis-backed strategies for adaptive-concurrency (e.g. distributed token-bucket rate limiting).",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "exports": {
     ".": {
@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test \"src/**/*.test.ts\""
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {
     "adaptive-concurrency": "workspace:*"
