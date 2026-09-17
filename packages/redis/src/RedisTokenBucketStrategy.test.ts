@@ -286,7 +286,7 @@ describe("RedisTokenBucketStrategy", () => {
   });
 
   describe("error handling on inner reservation transitions", () => {
-    it("surfaces cancel-throws via onReservationError(phase: cancel) without throwing (bucket-denied path)", async () => {
+    it("reports a cancel-throw on the bucket-denied path without throwing", async () => {
       const client = makeMockClient({ responses: [[0, 100]] });
       const bucket = new RedisTokenBucket(client, {
         keyPrefix: "test",
@@ -298,11 +298,7 @@ describe("RedisTokenBucketStrategy", () => {
         reserveResults: [true],
         cancelThrows: cancelError,
       });
-      const errors: Array<{
-        context: string;
-        phase: "cancel" | "commit";
-        error: unknown;
-      }> = [];
+      const errors: Array<{ context: string; error: unknown }> = [];
       const strategy = new RedisTokenBucketStrategy<string>({
         bucket,
         inner: inner.strategy,
@@ -315,12 +311,14 @@ describe("RedisTokenBucketStrategy", () => {
         undefined,
         "cancel-throw on bucket denial must not turn into a thrown reserve",
       );
-      assert.deepEqual(errors, [
-        { context: "ctx-x", phase: "cancel", error: cancelError },
-      ]);
+      assert.deepEqual(
+        errors,
+        [{ context: "ctx-x", error: cancelError }],
+        "the caller gets no reservation here, so the hook is its only signal",
+      );
     });
 
-    it("surfaces cancel-throws via onReservationError(phase: cancel) on outer-cancel after both granted", async () => {
+    it("propagates a cancel-throw from a returned reservation, still refunding", async () => {
       const client = makeMockClient({
         responses: [
           [1, 0], // tryAcquire grants
@@ -337,11 +335,7 @@ describe("RedisTokenBucketStrategy", () => {
         reserveResults: [true],
         cancelThrows: cancelError,
       });
-      const errors: Array<{
-        context: string;
-        phase: "cancel" | "commit";
-        error: unknown;
-      }> = [];
+      const errors: Array<{ context: string; error: unknown }> = [];
       const strategy = new RedisTokenBucketStrategy<string>({
         bucket,
         inner: inner.strategy,
@@ -353,19 +347,19 @@ describe("RedisTokenBucketStrategy", () => {
         fakeState,
       );
       assert.ok(reservation);
-      await reservation.cancel();
 
-      assert.deepEqual(errors, [
-        { context: "ctx-y", phase: "cancel", error: cancelError },
-      ]);
+      // The caller invoked this transition, so it can catch the failure. The
+      // hook is for the reservation the caller never received.
+      await assert.rejects(async () => await reservation.cancel(), cancelError);
+      assert.deepEqual(errors, [], "no hook call for a returned reservation");
       assert.equal(
         client.evalShaCalls.length,
         2,
-        "bucket token must still be refunded even when the inner cancel throws",
+        "the token is refunded even when the inner cancel throws",
       );
     });
 
-    it("refunds the bucket and re-throws on commit-throw, surfacing onReservationError(phase: commit)", async () => {
+    it("refunds the bucket and re-throws on commit-throw", async () => {
       const client = makeMockClient({
         responses: [
           [1, 0], // tryAcquire grants
@@ -382,11 +376,7 @@ describe("RedisTokenBucketStrategy", () => {
         reserveResults: [true],
         commitThrows: commitError,
       });
-      const errors: Array<{
-        context: string;
-        phase: "cancel" | "commit";
-        error: unknown;
-      }> = [];
+      const errors: Array<{ context: string; error: unknown }> = [];
       const strategy = new RedisTokenBucketStrategy<string>({
         bucket,
         inner: inner.strategy,
@@ -404,9 +394,7 @@ describe("RedisTokenBucketStrategy", () => {
         commitError,
         "commit-throw must propagate to the caller",
       );
-      assert.deepEqual(errors, [
-        { context: "ctx-c", phase: "commit", error: commitError },
-      ]);
+      assert.deepEqual(errors, [], "no hook call for a returned reservation");
       assert.equal(
         client.evalShaCalls.length,
         2,

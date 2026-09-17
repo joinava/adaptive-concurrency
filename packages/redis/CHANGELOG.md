@@ -11,6 +11,31 @@ Releases before 0.3.0 have no entries; see the git history.
 
 ## [0.3.0] - 2026-09-16
 
+### Breaking
+
+- `onReservationError` now covers one case instead of three: the inner's
+  `reservation.cancel()` throwing while the bucket denies. That is the only
+  fault the caller cannot observe for itself, because the strategy returns
+  `undefined` and the caller never receives a reservation to inspect.
+
+  A reservation the strategy already returned no longer routes its failures
+  through the hook. An error from its `commit()` or `cancel()` propagates to
+  whoever called that transition. The bucket token is still settled first,
+  refunded on a commit failure and on every cancel.
+
+  Two consequences for existing callers:
+  - `cancel()` on a returned reservation used to swallow an inner failure and
+    resolve. It now rejects. Under `Limiter` this is not observable, because
+    `Limiter` cancels through an internal fire-and-forget helper that ignores
+    the result. Callers driving the strategy directly will see the rejection.
+  - `ReservationErrorInfo` loses its `phase` field, which had only one
+    reachable value once the hook narrowed to the denial path.
+
+  The old contract gave a returned reservation a private error channel that an
+  exempt one could not have, which made `appliesTo` look inconsistent. Under
+  the narrower contract both kinds of reservation propagate their own errors,
+  so there is nothing to reconcile.
+
 ### Added
 
 - `RedisTokenBucketStrategy` accepts `appliesTo`, a predicate selecting which
