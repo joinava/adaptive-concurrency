@@ -14,6 +14,20 @@ import type { RedisTokenBucket } from "./RedisTokenBucket.js";
  * 2. The Redis token bucket grants a token (a fleet-wide rate limit of tokens
  *    per `refillIntervalMs` shared across processes).
  *
+ * **Scoping the bucket to some contexts (`appliesTo`).** By default the bucket
+ * governs every context. Pass `appliesTo` to narrow it: a context the predicate
+ * rejects keeps the inner strategy's protections (per-process adaptive limit,
+ * partition fairness) but skips the bucket entirely, so no token is taken and
+ * none has to be refunded. The predicate runs *after* the inner reserves, so an
+ * exempt context is still bounded locally.
+ *
+ * The safe shape is a sub-budget. Nest this strategy inside an outer one whose
+ * bucket still governs every context, and let the inner bucket meter one class
+ * of traffic. Exempting a class from the *only* bucket in a chain is a
+ * different thing: it converts a hard fleet-wide ceiling into a per-process
+ * soft bound for that class, because the inner strategy cannot see the other
+ * processes.
+ *
  * **Ordering.** The inner runs first. Reservation is contractually
  * side-effect free beyond admission bookkeeping, so a bucket denial cancels
  * the inner reservation cleanly with no observable trace (no metric pollution,
@@ -73,6 +87,7 @@ export type ReservationErrorInfo<ContextT> = {
 export class RedisTokenBucketStrategy<ContextT> {
   readonly #bucket: RedisTokenBucket;
   readonly #keyResolver: (context: ContextT) => string;
+  readonly #appliesTo: (context: ContextT) => boolean;
   readonly #onReservationError:
     | ((info: ReservationErrorInfo<ContextT>) => void)
     | undefined;
@@ -95,6 +110,18 @@ export class RedisTokenBucketStrategy<ContextT> {
      */
     keyResolver?: (context: ContextT) => string;
     /**
+     * Which contexts this bucket governs. Defaults to every context. Return
+     * `false` to exempt one: the inner strategy still reserves and bounds it,
+     * but the bucket is skipped entirely, so no token is taken and none has to
+     * be refunded.
+     *
+     * Exempting a class of traffic from the only bucket in a chain gives up the
+     * fleet-wide ceiling for that class, leaving it bounded only per process.
+     * To meter a class without giving up the ceiling, nest this strategy inside
+     * an outer one whose bucket still governs every context.
+     */
+    appliesTo?: (context: ContextT) => boolean;
+    /**
      * Invoked when the inner's `reservation.cancel()` or `reservation.commit()`
      * throws. Lets callers wire up logging/metrics. Behavior per phase:
      *
@@ -109,6 +136,7 @@ export class RedisTokenBucketStrategy<ContextT> {
     this.#bucket = options.bucket;
     this.#inner = options.inner;
     this.#keyResolver = options.keyResolver ?? defaultKeyResolver;
+    this.#appliesTo = options.appliesTo ?? appliesToEveryContext;
     this.#onReservationError = options.onReservationError;
   }
 
@@ -121,6 +149,12 @@ export class RedisTokenBucketStrategy<ContextT> {
     const reservation = await this.#inner.tryReserveAllotment(context, state);
     if (!reservation) {
       return undefined;
+    }
+
+    // A context this bucket does not govern keeps the inner reservation and
+    // skips the bucket entirely (no token consumed, nothing to refund).
+    if (!this.#appliesTo(context)) {
+      return reservation;
     }
 
     const result = await this.#bucket.tryAcquire(key);
@@ -212,6 +246,10 @@ export class RedisTokenBucketStrategy<ContextT> {
       // refill, so the long-run rate is preserved.
     }
   }
+}
+
+function appliesToEveryContext(): boolean {
+  return true;
 }
 
 function defaultKeyResolver(): string {

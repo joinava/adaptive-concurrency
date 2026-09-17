@@ -512,6 +512,133 @@ describe("RedisTokenBucketStrategy", () => {
     });
   });
 
+  describe("appliesTo", () => {
+    type Ctx = { partition: "interactive" | "bulk" };
+
+    it("skips the bucket for a context it does not govern, but still reserves the inner", async () => {
+      // No scripted responses: any Redis call would throw "out of scripted
+      // responses", so this also proves the bucket is never consulted.
+      const client = makeMockClient({ responses: [] });
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 5,
+        refillIntervalMs: 1000,
+      });
+      const inner = makeInnerStub<Ctx>();
+      const strategy = new RedisTokenBucketStrategy<Ctx>({
+        bucket,
+        inner: inner.strategy,
+        appliesTo: (ctx) => ctx.partition !== "interactive",
+      });
+
+      const context: Ctx = { partition: "interactive" };
+      const reservation = await strategy.tryReserveAllotment(
+        context,
+        fakeState,
+      );
+
+      assert.ok(reservation, "an exempt context is still admitted");
+      assert.deepEqual(
+        inner.reserveCalls,
+        [context],
+        "the inner still bounds it",
+      );
+      assert.equal(
+        client.evalShaCalls.length,
+        0,
+        "the bucket is not consulted",
+      );
+
+      await reservation.commit();
+      assert.deepEqual(inner.commitCalls, [context]);
+      assert.equal(client.evalShaCalls.length, 0);
+    });
+
+    it("still gates a non-exempt context through the same strategy", async () => {
+      const client = makeMockClient({ responses: [[1, 0]] });
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 5,
+        refillIntervalMs: 1000,
+      });
+      const inner = makeInnerStub<Ctx>();
+      const strategy = new RedisTokenBucketStrategy<Ctx>({
+        bucket,
+        inner: inner.strategy,
+        appliesTo: (ctx) => ctx.partition !== "interactive",
+      });
+
+      await strategy.tryReserveAllotment(
+        { partition: "interactive" },
+        fakeState,
+      );
+      assert.equal(client.evalShaCalls.length, 0);
+
+      const reservation = await strategy.tryReserveAllotment(
+        { partition: "bulk" },
+        fakeState,
+      );
+      assert.ok(reservation);
+      assert.equal(
+        client.evalShaCalls.length,
+        1,
+        "the predicate narrows the bucket per context, it does not disable it",
+      );
+    });
+
+    it("does not refund a token when an exempt reservation is cancelled", async () => {
+      const client = makeMockClient({ responses: [] });
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 5,
+        refillIntervalMs: 1000,
+      });
+      const inner = makeInnerStub<Ctx>();
+      const strategy = new RedisTokenBucketStrategy<Ctx>({
+        bucket,
+        inner: inner.strategy,
+        appliesTo: () => false,
+      });
+
+      const context: Ctx = { partition: "interactive" };
+      const reservation = await strategy.tryReserveAllotment(
+        context,
+        fakeState,
+      );
+      assert.ok(reservation);
+
+      await reservation.cancel();
+
+      assert.deepEqual(inner.cancelCalls, [context], "the inner is cancelled");
+      assert.equal(
+        client.evalShaCalls.length,
+        0,
+        "no token was taken, so none may be refunded",
+      );
+    });
+
+    it("gates every context by default", async () => {
+      const client = makeMockClient({ responses: [[1, 0]] });
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 5,
+        refillIntervalMs: 1000,
+      });
+      const inner = makeInnerStub<Ctx>();
+      const strategy = new RedisTokenBucketStrategy<Ctx>({
+        bucket,
+        inner: inner.strategy,
+      });
+
+      const reservation = await strategy.tryReserveAllotment(
+        { partition: "interactive" },
+        fakeState,
+      );
+      assert.ok(reservation);
+      assert.equal(client.evalShaCalls.length, 1);
+    });
+  });
+
   describe("graceful degradation", () => {
     it("falls back to inner-only behavior when Redis is unavailable", async () => {
       const errors: unknown[] = [];
