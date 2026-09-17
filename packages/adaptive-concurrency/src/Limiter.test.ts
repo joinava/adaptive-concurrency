@@ -9,7 +9,7 @@ import type {
   AcquireStrategy,
   AllotmentUnavailableStrategy,
 } from "./Limiter.js";
-import { Limiter } from "./Limiter.js";
+import { Limiter, sharedStallLogs } from "./Limiter.js";
 import {
   BlockingBacklogRejection,
   MAX_TIMEOUT,
@@ -1963,5 +1963,41 @@ describe("Limiter stall detection", () => {
     assert.equal(t.pending(), 1);
     limiter.dispose();
     assert.equal(t.pending(), 0);
+  });
+
+  it("limiters on the default clock share one log per configuration and release it on the last dispose", () => {
+    const key = "10:20";
+    assert.equal(sharedStallLogs.has(key), false, "registry starts empty");
+
+    const a = new Limiter<string>({
+      stallDetection: { resolutionMs: 10, floorMs: 20 },
+    });
+    const b = new Limiter<string>({
+      stallDetection: { resolutionMs: 10, floorMs: 20 },
+    });
+    const other = new Limiter<string>({
+      stallDetection: { resolutionMs: 10, floorMs: 40 },
+    });
+
+    const entry = sharedStallLogs.get(key)!;
+    assert.equal(entry.users, 2, "one entry serves both limiters");
+    assert.equal(entry.log.running, true);
+    assert.equal(
+      sharedStallLogs.size,
+      2,
+      "a different configuration gets its own",
+    );
+
+    a.dispose();
+    a.dispose();
+    assert.equal(entry.users, 1, "a second dispose does not release twice");
+    assert.equal(entry.log.running, true, "still in use by b");
+
+    b.dispose();
+    assert.equal(entry.log.running, false, "last user stops the log");
+    assert.equal(sharedStallLogs.has(key), false, "and removes the entry");
+
+    other.dispose();
+    assert.equal(sharedStallLogs.size, 0);
   });
 });

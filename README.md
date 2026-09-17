@@ -217,7 +217,7 @@ const limiter = new Limiter({
 });
 ```
 
-Limiters on the default clock and timer share one log per configuration. A limiter with an injected `clock` or `timer` gets its own, on that clock, and stops it on `dispose()`.
+Limiters on the default clock and timer share one log per configuration; the log stops when the last limiter using it is disposed. A limiter with an injected `clock` or `timer` gets its own, on that clock, and stops it on `dispose()`.
 
 ## Redis Token Bucket
 

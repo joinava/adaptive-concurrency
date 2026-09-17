@@ -52,23 +52,54 @@ const defaultTimer = {
  * that runs on the default clock and timer. A stall is a property of the
  * thread, not of a limiter, so one timer serves all of them; and a shared
  * log built on `defaultClock` is on the same time base as their samples.
+ *
+ * Each entry counts the limiters using it. The log is stopped and the entry
+ * removed when the last one is disposed, so a disposed limiter leaves no
+ * timer behind. Exported for tests only; not part of the package API.
  */
-const sharedStallLogs = new Map<string, StallLog>();
-function sharedStallLog(options: {
+export const sharedStallLogs = new Map<
+  string,
+  { log: StallLog; users: number }
+>();
+
+/**
+ * Returns the shared log for `options`, starting it on first use, and a
+ * release function that undoes this call. Releasing twice is a no-op.
+ */
+function acquireSharedStallLog(options: {
   resolutionMs?: number;
   floorMs?: number;
-}): StallLog {
+}): { log: StallLog; release: () => void } {
   const key = `${options.resolutionMs ?? ""}:${options.floorMs ?? ""}`;
-  let log = sharedStallLogs.get(key);
-  if (log === undefined) {
-    log = new StallLog({
-      clock: defaultClock,
-      timer: defaultTimer,
-      ...options,
-    });
-    sharedStallLogs.set(key, log);
+  let entry = sharedStallLogs.get(key);
+  if (entry === undefined) {
+    entry = {
+      log: new StallLog({
+        clock: defaultClock,
+        timer: defaultTimer,
+        ...options,
+      }),
+      users: 0,
+    };
+    sharedStallLogs.set(key, entry);
   }
-  return log;
+  entry.users += 1;
+  entry.log.start();
+
+  let released = false;
+  const held = entry;
+  return {
+    log: held.log,
+    release: () => {
+      if (released) return;
+      released = true;
+      held.users -= 1;
+      if (held.users === 0 && sharedStallLogs.get(key) === held) {
+        held.log.stop();
+        sharedStallLogs.delete(key);
+      }
+    },
+  };
 }
 
 type AnyTimerHandle = NodeJS.Timeout | number;
@@ -248,8 +279,8 @@ export class Limiter<
   private readonly unsubscribeFromLimit: () => void;
 
   private readonly stallLog: StallLog | undefined;
-  /** True when this limiter started `stallLog` itself and must stop it. */
-  private readonly ownsStallLog: boolean;
+  /** Stops an owned `stallLog`, or releases this limiter's use of a shared one. */
+  private readonly releaseStallLog: (() => void) | undefined;
 
   private readonly successCounter: Counter;
   private readonly droppedCounter: Counter;
@@ -304,19 +335,21 @@ export class Limiter<
 
     if (options.stallDetection === undefined) {
       this.stallLog = undefined;
-      this.ownsStallLog = false;
+      this.releaseStallLog = undefined;
     } else if (options.clock === undefined && options.timer === undefined) {
-      this.stallLog = sharedStallLog(options.stallDetection);
-      this.ownsStallLog = false;
+      const shared = acquireSharedStallLog(options.stallDetection);
+      this.stallLog = shared.log;
+      this.releaseStallLog = shared.release;
     } else {
-      this.stallLog = new StallLog({
+      const log = new StallLog({
         clock: this.clock,
         timer: this.timer,
         ...options.stallDetection,
       });
-      this.ownsStallLog = true;
+      log.start();
+      this.stallLog = log;
+      this.releaseStallLog = () => log.stop();
     }
-    this.stallLog?.start();
 
     this.unsubscribeFromLimit = this.limitAlgorithm.subscribe((newLimit) => {
       const oldLimit = this._limit;
@@ -753,7 +786,7 @@ export class Limiter<
     this.disposed = true;
     this.cancelProbe();
     this.unsubscribeFromLimit();
-    if (this.ownsStallLog) this.stallLog?.stop();
+    this.releaseStallLog?.();
   }
 
   [Symbol.dispose](): void {

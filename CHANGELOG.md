@@ -37,7 +37,8 @@ Releases before 0.14.0 have no entries; see the git history.
   log and withholds the RTT sample of any successful request whose start or
   observed end fell inside a stall. Withheld samples are counted on the new
   `stall_ignored_sample` metric (`MetricIds.STALL_IGNORED_SAMPLE_NAME`).
-  Drops are always recorded.
+  Drops are always recorded. Limiters on the default clock share one log per
+  configuration, released when the last of them is disposed.
 - `AIMDLimit` and `GroupAwareLimit` apply at most one increase and one
   decrease per flight of requests. A change only affects requests admitted
   after it, so samples from earlier requests never compound it.
