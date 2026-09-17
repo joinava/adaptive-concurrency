@@ -1,6 +1,7 @@
 # Changelog
 
 All notable changes to the `adaptive-concurrency` package are recorded here.
+The Redis package is versioned separately; its 0.2.0 pairs with core 0.14.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The package is pre-1.0, so a minor version bump can contain breaking changes.
 
