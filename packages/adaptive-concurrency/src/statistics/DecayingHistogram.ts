@@ -1,12 +1,26 @@
 /**
- * A histogram with log-spaced bins and continuous exponential time decay.
+ * A histogram with log-spaced bins and exponential decay.
  *
  * Each bin stores a decayed count that is incremented when a sample falls
- * within its range. All counts decay toward zero over time using an
- * exponential half-life, so older observations naturally lose influence.
+ * within its range. Counts decay in one of two ways, chosen by the options:
+ *
+ * - by time (`halfLife`): all counts decay toward zero with an exponential
+ *   half-life, so older observations lose influence at a rate independent of
+ *   how many samples arrive. Suits a long-lived baseline.
+ * - by sample count (`sampleWindow`): each new sample first multiplies all
+ *   counts by `1 - 2 / (sampleWindow + 1)`, the same weighting an exponential
+ *   moving average over `sampleWindow` samples applies. The histogram then
+ *   reflects roughly the last `sampleWindow` samples whatever their rate.
+ *   Suits a "recent" estimate that must respond in a fixed number of samples.
  *
  * Provides approximate percentile queries in O(numBins) time and fixed memory
- * (~25 floats), independent of sample volume.
+ * (121 floats at the defaults), independent of sample volume.
+ *
+ * Resolution: a percentile query returns the geometric midpoint of the bin
+ * that contains the target, so its error is bounded by the bin width. At the
+ * default 20 bins per decade a bin spans a factor of 10^(1/20) ≈ 1.122, so a
+ * result is within ±6% of the true percentile. A ratio of two percentiles
+ * from histograms with the same bin layout moves in steps of that factor.
  */
 export class DecayingHistogram {
   /** Lower boundary (inclusive) of each bin. The last bin extends to +Infinity. */
@@ -17,8 +31,10 @@ export class DecayingHistogram {
   private readonly maxValue: number;
   private readonly logWarning: ((message: string) => void) | undefined;
 
-  /** Precomputed decay constant: ln(2) / halfLife */
+  /** Precomputed time-decay constant: ln(2) / halfLife, or 0 for no time decay. */
   private readonly lambda: number;
+  /** Factor applied to every count on each new sample, or 1 for no count decay. */
+  private readonly perSampleFactor: number;
 
   /** Timestamp of the last decay application, or undefined before the first sample. */
   private lastDecayTime: number | undefined;
@@ -26,29 +42,56 @@ export class DecayingHistogram {
   /** Accumulated decayed total (sum of all bin counts after last decay). */
   private _totalCount = 0;
 
-  constructor(options: {
-    /** Half-life for exponential decay, in milliseconds. */
-    halfLife: number;
-    minValue?: number;
-    maxValue?: number;
-    binsPerDecade?: number;
-    logWarning?: (message: string) => void;
-  }) {
+  constructor(
+    options: (
+      | {
+          /** Half-life for exponential time decay, in milliseconds. */
+          halfLife: number;
+          sampleWindow?: never;
+        }
+      | {
+          /** Window, in samples, for exponential count decay. See the class doc. */
+          sampleWindow: number;
+          halfLife?: never;
+        }
+    ) & {
+      minValue?: number;
+      maxValue?: number;
+      /** Default: 20. See the class doc for what this means for resolution. */
+      binsPerDecade?: number;
+      logWarning?: (message: string) => void;
+    },
+  ) {
     const {
       halfLife,
+      sampleWindow,
       minValue = 0.1,
       maxValue = 100_000,
-      binsPerDecade = 5,
+      binsPerDecade = 20,
       logWarning,
     } = options;
-    if (halfLife <= 0) {
+
+    // The types make exactly one decay mode expressible; these checks cover
+    // callers outside TypeScript.
+    if (halfLife === undefined && sampleWindow === undefined) {
+      throw new RangeError("halfLife or sampleWindow is required");
+    }
+    if (halfLife !== undefined && sampleWindow !== undefined) {
+      throw new RangeError("halfLife and sampleWindow are mutually exclusive");
+    }
+    if (halfLife !== undefined && !(halfLife > 0)) {
       throw new RangeError("halfLife must be positive");
+    }
+    if (sampleWindow !== undefined && !(sampleWindow >= 1)) {
+      throw new RangeError("sampleWindow must be >= 1");
     }
     if (minValue <= 0 || maxValue <= minValue) {
       throw new RangeError("Must have 0 < minValue < maxValue");
     }
 
-    this.lambda = Math.LN2 / halfLife;
+    this.lambda = halfLife === undefined ? 0 : Math.LN2 / halfLife;
+    this.perSampleFactor =
+      sampleWindow === undefined ? 1 : 1 - 2 / (sampleWindow + 1);
     this.minValue = minValue;
     this.maxValue = maxValue;
     this.logWarning = logWarning;
@@ -60,7 +103,10 @@ export class DecayingHistogram {
 
     this.binEdges = new Float64Array(this.numBins);
     for (let i = 0; i < this.numBins; i++) {
-      this.binEdges[i] = Math.pow(10, logMin + (i * decades) / (this.numBins - 1));
+      this.binEdges[i] = Math.pow(
+        10,
+        logMin + (i * decades) / (this.numBins - 1),
+      );
     }
 
     this.binCounts = new Float64Array(this.numBins);
@@ -85,6 +131,7 @@ export class DecayingHistogram {
     }
 
     this.applyDecay(now);
+    if (this.perSampleFactor < 1) this.scaleCounts(this.perSampleFactor);
 
     const bin = this.findBin(value);
     this.binCounts[bin]!++;
@@ -119,8 +166,7 @@ export class DecayingHistogram {
       cumulative += this.binCounts[i]!;
       if (cumulative >= target) {
         const lo = this.binEdges[i]!;
-        const hi =
-          i + 1 < this.numBins ? this.binEdges[i + 1]! : lo * 2;
+        const hi = i + 1 < this.numBins ? this.binEdges[i + 1]! : lo * 2;
         return Math.sqrt(lo * hi);
       }
     }
@@ -138,9 +184,11 @@ export class DecayingHistogram {
 
   /**
    * Apply time-based decay to all bins. Idempotent if called multiple times
-   * at the same timestamp.
+   * at the same timestamp. A no-op without a `halfLife`.
    */
   private applyDecay(now: number): void {
+    if (this.lambda === 0) return;
+
     if (this.lastDecayTime === undefined) {
       this.lastDecayTime = now;
       return;
@@ -151,7 +199,11 @@ export class DecayingHistogram {
       return;
     }
 
-    const factor = Math.exp(-this.lambda * elapsed);
+    this.scaleCounts(Math.exp(-this.lambda * elapsed));
+    this.lastDecayTime = now;
+  }
+
+  private scaleCounts(factor: number): void {
     let total = 0;
     for (let i = 0; i < this.numBins; i++) {
       const decayed = this.binCounts[i]! * factor;
@@ -159,7 +211,6 @@ export class DecayingHistogram {
       total += decayed;
     }
     this._totalCount = total;
-    this.lastDecayTime = now;
   }
 
   /**

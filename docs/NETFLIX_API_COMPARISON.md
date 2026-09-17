@@ -260,7 +260,8 @@ All algorithm time inputs/options in TypeScript use milliseconds (not Java nanos
 
 ### `AIMDLimit`
 
-- TypeScript adds a `backoffJitter` option (default `0.02`): an absolute +/- jitter band around `backoffRatio` applied to each multiplicative decrease. This breaks lockstep oscillation when multiple independent clients share the same configuration. Must be in `[0, 0.05]`.
+- Java `backoffRatio(...)` -> TypeScript `decrease: { ratio, jitter }`. `jitter` (default `0.02`) is an absolute +/- band around `ratio` applied to each multiplicative decrease; it breaks lockstep oscillation when multiple independent clients share the same configuration. Must be in `[0, 0.05]`.
+- Increases and decreases are each gated to one per flight of requests, keyed on the sample's `startTime` (TCP's one-reduction-per-window rule). Java applies both on every sample.
 
 ### `Gradient2Limit` naming
 
@@ -384,10 +385,12 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 - `ListenerSet`
 - `createPercentileSampleWindow(...)`
 - `MostRecentValue`
-- `DecayingHistogram` - A histogram with log-spaced bins and continuous exponential time decay. Provides approximate percentile queries in O(numBins) time and fixed memory.
+- `DecayingHistogram` - A histogram with log-spaced bins and exponential decay by time (`halfLife`) or by sample count (`sampleWindow`), one or the other. Default 20 bins per decade (±6% percentile resolution). Provides approximate percentile queries in O(numBins) time and fixed memory.
 - `LimiterOptions.operationNameFor` — derives operation names from context for group-aware limits
 - `AdaptiveLimit.addSample()` `operationName` parameter
-- `AIMDLimit.backoffJitter` option
+- `AIMDLimit` `decrease.jitter` option, and one-change-per-flight gating in `AIMDLimit` and `GroupAwareLimit`
+- `LimiterOptions.stallDetection` — withholds RTT samples that an event-loop stall delayed (`stall_ignored_sample` metric)
+- `minUtilizationToGrow` option on `AIMDLimit`, `GradientLimit` and `GroupAwareLimit` (Java hard-codes the app-limited check at half the limit)
 - `acquire_attempt` metric (`MetricIds.ACQUIRE_ATTEMPT_NAME`)
 - `acquire_time` distribution metric (`MetricIds.ACQUIRE_TIME_NAME`)
 - broad `AbortSignal` support in acquire/rejection/subscribe APIs

@@ -161,6 +161,53 @@ describe("DecayingHistogram", () => {
     assert.equal(p10, p90);
   });
 
+  it("resolves a percentile to within one bin at 20 bins per decade", () => {
+    // 20 bins per decade: a bin spans ×1.122, so the geometric midpoint is
+    // within ±6% of any value in the bin. Sweep values across a decade to
+    // catch bin-edge placement, not just one lucky position.
+    for (let k = 0; k < 40; k++) {
+      const value = 100 * 10 ** (k / 40);
+      const h = new DecayingHistogram({ halfLife: 60_000 });
+      for (let i = 0; i < 100; i++) h.addSample(value, 0);
+      const ratio = h.percentile(0.5, 0) / value;
+      assert.ok(
+        ratio > 0.94 && ratio < 1.07,
+        `value ${value.toFixed(1)}: p50/value = ${ratio.toFixed(3)}`,
+      );
+    }
+  });
+
+  it("count decay: the histogram reflects roughly the last sampleWindow samples", () => {
+    const h = new DecayingHistogram({ sampleWindow: 100 });
+    for (let i = 0; i < 1000; i++) h.addSample(10, 0);
+    assert.ok(h.percentile(0.5, 0) < 12);
+
+    // After 100 new samples at 50, about 87% of the mass is new
+    // (1 - (1 - 2/101)^100), so the median has moved to 50.
+    for (let i = 0; i < 100; i++) h.addSample(50, 0);
+    const p50 = h.percentile(0.5, 0);
+    assert.ok(p50 > 45 && p50 < 55, `p50 = ${p50.toFixed(2)}`);
+    // And the 10th percentile still sees the old mass.
+    assert.ok(h.percentile(0.1, 0) < 12);
+  });
+
+  it("count decay is independent of wall time", () => {
+    const h = new DecayingHistogram({ sampleWindow: 10 });
+    for (let i = 0; i < 100; i++) h.addSample(10, 0);
+    const before = h.totalCount;
+    // Time passes; nothing changes without new samples.
+    assert.equal(h.percentile(0.5, 1_000_000), h.percentile(0.5, 0));
+    assert.equal(h.totalCount, before);
+  });
+
+  it("time and count decay are mutually exclusive", () => {
+    assert.throws(
+      // @ts-expect-error halfLife and sampleWindow are mutually exclusive
+      () => new DecayingHistogram({ halfLife: 1000, sampleWindow: 10 }),
+      /mutually exclusive/,
+    );
+  });
+
   it("throws on invalid halfLife", () => {
     assert.throws(
       () => new DecayingHistogram({ halfLife: 0 }),
@@ -169,6 +216,17 @@ describe("DecayingHistogram", () => {
     assert.throws(
       () => new DecayingHistogram({ halfLife: -1 }),
       /halfLife must be positive/,
+    );
+  });
+
+  it("requires halfLife or sampleWindow", () => {
+    assert.throws(
+      () => new DecayingHistogram({}),
+      /halfLife or sampleWindow is required/,
+    );
+    assert.throws(
+      () => new DecayingHistogram({ sampleWindow: 0 }),
+      /sampleWindow must be >= 1/,
     );
   });
 
