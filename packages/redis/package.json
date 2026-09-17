@@ -1,7 +1,7 @@
 {
   "name": "@adaptive-concurrency/redis",
   "description": "Redis-backed strategies for adaptive-concurrency (e.g. distributed token-bucket rate limiting).",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
