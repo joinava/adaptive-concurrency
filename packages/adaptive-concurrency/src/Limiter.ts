@@ -9,6 +9,7 @@ import type {
 } from "./MetricRegistry.js";
 import { MetricIds, NoopMetricRegistry } from "./MetricRegistry.js";
 import type { MaybePromise } from "./types/MaybePromise.js";
+import { StallLog } from "./utils/StallLog.js";
 import type {
   AcquireOptions,
   AcquireResult,
@@ -37,6 +38,38 @@ export {
 // Limiter options
 // ---------------------------------------------------------------------------
 let idCounter = 0;
+
+const defaultClock = (): number => performance.now();
+const defaultTimer = {
+  setTimeout: (fn: () => void, ms: number): AnyTimerHandle =>
+    globalThis.setTimeout(fn, ms),
+  clearTimeout: (handle: AnyTimerHandle): void =>
+    globalThis.clearTimeout(handle),
+};
+
+/**
+ * One {@link StallLog} per distinct configuration, shared by every limiter
+ * that runs on the default clock and timer. A stall is a property of the
+ * thread, not of a limiter, so one timer serves all of them; and a shared
+ * log built on `defaultClock` is on the same time base as their samples.
+ */
+const sharedStallLogs = new Map<string, StallLog>();
+function sharedStallLog(options: {
+  resolutionMs?: number;
+  floorMs?: number;
+}): StallLog {
+  const key = `${options.resolutionMs ?? ""}:${options.floorMs ?? ""}`;
+  let log = sharedStallLogs.get(key);
+  if (log === undefined) {
+    log = new StallLog({
+      clock: defaultClock,
+      timer: defaultTimer,
+      ...options,
+    });
+    sharedStallLogs.set(key, log);
+  }
+  return log;
+}
 
 type AnyTimerHandle = NodeJS.Timeout | number;
 
@@ -121,6 +154,37 @@ export interface LimiterOptions<
     setTimeout(fn: () => void, ms: number): TimerHandle;
     clearTimeout(handle: TimerHandle): void;
   };
+
+  /**
+   * Event-loop stall detection. Off when omitted.
+   *
+   * The RTT the limiter measures is wall time between two reads of `clock`
+   * in JS, so a stall of this thread (blocking JS, a GC pause, a process
+   * freeze) inflates every sample it delays, and the limit algorithm reads
+   * the inflation as downstream latency. One 300 ms stall can collapse an
+   * adaptive limit to its floor.
+   *
+   * When enabled, the limiter keeps a {@link StallLog} on its own clock and
+   * timer, and a successful request whose start or observed end fell inside
+   * a stall is released without feeding the limit algorithm a sample (it
+   * still counts as a success; see `MetricIds.STALL_IGNORED_SAMPLE_NAME`).
+   * Requests that started before a stall and ended after it were not
+   * delayed by it, and are sampled normally. Drops are always recorded.
+   *
+   * Limiters on the default clock and timer share one log per
+   * configuration, so enabling this on many limiters costs one timer. A
+   * limiter with an injected `clock` or `timer` gets its own log, on that
+   * clock and timer, and stops it on `dispose()`.
+   */
+  stallDetection?: {
+    /** Interval between stall-log ticks, in milliseconds. Default: 10. */
+    resolutionMs?: number;
+    /**
+     * A tick later than this, in milliseconds, opens a stall. Must be at
+     * least `resolutionMs`. Default: 20.
+     */
+    floorMs?: number;
+  };
 }
 
 /**
@@ -183,9 +247,14 @@ export class Limiter<
   private disposed = false;
   private readonly unsubscribeFromLimit: () => void;
 
+  private readonly stallLog: StallLog | undefined;
+  /** True when this limiter started `stallLog` itself and must stop it. */
+  private readonly ownsStallLog: boolean;
+
   private readonly successCounter: Counter;
   private readonly droppedCounter: Counter;
   private readonly ignoredCounter: Counter;
+  private readonly stallIgnoredCounter: Counter;
 
   private readonly acquireSucceededCounter: Counter;
   private readonly acquireFailedCounter: Counter;
@@ -200,7 +269,7 @@ export class Limiter<
   }
 
   constructor(options: LimiterOptions<Context, TimerHandle> = {}) {
-    this.clock = options.clock ?? (() => performance.now());
+    this.clock = options.clock ?? defaultClock;
     this.limitAlgorithm = options.limit ?? Limiter.makeDefaultLimit();
     this._limit = this.limitAlgorithm.currentLimit;
     this.bypassResolver = options.bypassResolver;
@@ -231,10 +300,23 @@ export class Limiter<
       );
     }
 
-    this.timer = options.timer ?? {
-      setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
-      clearTimeout: (handle) => globalThis.clearTimeout(handle),
-    };
+    this.timer = options.timer ?? defaultTimer;
+
+    if (options.stallDetection === undefined) {
+      this.stallLog = undefined;
+      this.ownsStallLog = false;
+    } else if (options.clock === undefined && options.timer === undefined) {
+      this.stallLog = sharedStallLog(options.stallDetection);
+      this.ownsStallLog = false;
+    } else {
+      this.stallLog = new StallLog({
+        clock: this.clock,
+        timer: this.timer,
+        ...options.stallDetection,
+      });
+      this.ownsStallLog = true;
+    }
+    this.stallLog?.start();
 
     this.unsubscribeFromLimit = this.limitAlgorithm.subscribe((newLimit) => {
       const oldLimit = this._limit;
@@ -293,6 +375,10 @@ export class Limiter<
       id: limiterName,
       status: "ignored",
     });
+    this.stallIgnoredCounter = registry.counter(
+      MetricIds.STALL_IGNORED_SAMPLE_NAME,
+      { id: limiterName },
+    );
 
     this.acquireSucceededCounter = registry.counter(
       MetricIds.ACQUIRE_ATTEMPT_NAME,
@@ -495,14 +581,23 @@ export class Limiter<
         try {
           // if clock threw, preventing us from getting an rtt, we don't add a sample.
           if (endTime !== undefined) {
-            const rtt = endTime - operationStartTime;
-            this.limitAlgorithm.addSample(
-              operationStartTime,
-              rtt,
-              currentInflight,
-              false,
-              operationName,
-            );
+            if (this.stallLog?.touched(operationStartTime, endTime)) {
+              // An event-loop stall delayed this request's start or end, so
+              // its RTT says nothing about the downstream. Count it, but
+              // keep it away from the limit algorithm.
+              void fireAndForget(() => {
+                this.stallIgnoredCounter.add(1, incrementTags);
+              });
+            } else {
+              const rtt = endTime - operationStartTime;
+              this.limitAlgorithm.addSample(
+                operationStartTime,
+                rtt,
+                currentInflight,
+                false,
+                operationName,
+              );
+            }
           }
         } catch {}
         try {
@@ -658,6 +753,7 @@ export class Limiter<
     this.disposed = true;
     this.cancelProbe();
     this.unsubscribeFromLimit();
+    if (this.ownsStallLog) this.stallLog?.stop();
   }
 
   [Symbol.dispose](): void {

@@ -4,6 +4,10 @@ import type { DistributionMetric, MetricRegistry } from "../MetricRegistry.js";
 import { NoopMetricRegistry } from "../MetricRegistry.js";
 import { ExpMovingAverage } from "../statistics/ExpMovingAverage.js";
 import type { StreamingStatistic } from "../statistics/StreamingStatistic.js";
+import {
+  resolveMinUtilizationToGrow,
+  type AppLimitedOptions,
+} from "./appLimited.js";
 import type { AdaptiveLimit } from "./StreamingLimit.js";
 
 /**
@@ -49,7 +53,7 @@ import type { AdaptiveLimit } from "./StreamingLimit.js";
  *    state the long term RTT may take some time to go back to normal and could
  *    potentially be several multiples higher than the current RTT.
  */
-export interface Gradient2LimitOptions {
+export interface Gradient2LimitOptions extends AppLimitedOptions {
   /** Initial limit used by the limiter. Default: 20 */
   initialLimit?: number;
 
@@ -138,6 +142,7 @@ export class GradientLimit implements AdaptiveLimit {
   private readonly smoothing: number;
   private readonly tolerance: number;
   private readonly recoveryProbeBaseMs: number;
+  private readonly minUtilizationToGrow: number;
 
   private readonly longRttSampleListener: DistributionMetric;
   private readonly shortRttSampleListener: DistributionMetric;
@@ -154,6 +159,7 @@ export class GradientLimit implements AdaptiveLimit {
     this.tolerance = options.rttTolerance ?? 1.5;
     this.longRtt = new ExpMovingAverage(options.longWindow ?? 600, 10);
     this.recoveryProbeBaseMs = options.recoveryProbe?.baseMs ?? 1000;
+    this.minUtilizationToGrow = resolveMinUtilizationToGrow(options);
 
     if (options.rttTolerance !== undefined && options.rttTolerance < 1.0) {
       throw new RangeError("Tolerance must be >= 1.0");
@@ -241,7 +247,7 @@ export class GradientLimit implements AdaptiveLimit {
     }
 
     // Don't grow the limit if we are app limited
-    if (inflight < estimatedLimit / 2) {
+    if (inflight < this.minUtilizationToGrow * estimatedLimit) {
       return estimatedLimit;
     }
 

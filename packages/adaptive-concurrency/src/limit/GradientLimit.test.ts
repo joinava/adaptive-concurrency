@@ -10,6 +10,32 @@ describe("Gradient2Limit", () => {
     assert.equal(limit.currentLimit, 50);
   });
 
+  it("minUtilizationToGrow sets the inflight fraction needed to grow", () => {
+    const limit = new GradientLimit({
+      initialLimit: 50,
+      minLimit: 1,
+      maxConcurrency: 200,
+      minUtilizationToGrow: 0.8,
+    });
+
+    for (let i = 0; i < 50; i++) {
+      limit.addSample(0, 10, 39, false);
+    }
+    assert.equal(limit.currentLimit, 50, "39 of 50 in flight: app-limited");
+
+    // Gradient tests the fraction against its unrounded estimate, which
+    // grows a little on each sample, so stay clear of the boundary.
+    for (let i = 0; i < 50; i++) {
+      limit.addSample(0, 10, 45, false);
+    }
+    assert.ok(limit.currentLimit > 50, "45 of 50 in flight: grow");
+
+    assert.throws(
+      () => new GradientLimit({ minUtilizationToGrow: 1.5 }),
+      /minUtilizationToGrow must be in \(0, 1\]/,
+    );
+  });
+
   it("should increase the limit when gradient is favorable and inflight is high", () => {
     const limit = new GradientLimit({
       initialLimit: 20,

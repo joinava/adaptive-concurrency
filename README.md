@@ -160,6 +160,10 @@ This is immune to operation mix shifts: when traffic transitions from fast to sl
 
 Compared to using a separate limiter per operation type, the single `GroupAwareLimit` is more stable -- it better handles some operation types having few samples and propagates a drop signal from the backend through the whole limit (not just the limiter for whichever operation happened to witness the drop). See code for details.
 
+Per group it keeps two log-binned histograms of RTT, a slow time-decayed baseline and a fast count-decayed recent window, and compares the same percentile (default the median) of both. The limit grows by one while the ratio is below `rttRatioThresholds.increaseBelow` and shrinks multiplicatively (`decrease: { ratio, jitter }`, default `0.9` ± `0.02`) when it is above `rttRatioThresholds.decreaseAbove` or a request is dropped. Each kind of change happens at most once per flight of requests: a change only affects requests admitted after it, so samples from earlier requests never compound it.
+
+`AIMDLimit`, `GradientLimit` and `GroupAwareLimit` only grow while the client is using the limit: a sample can raise the limit only if at least `minUtilizationToGrow` (default `0.5`) of it was in flight when the request was admitted. The value sets how far above the current load the limit settles, about `load / minUtilizationToGrow`; that headroom absorbs demand steps at once but reaches the downstream untested. See the option's doc comment for the trade-off.
+
 ```typescript
 import { Limiter, GroupAwareLimit } from "adaptive-concurrency";
 
@@ -180,7 +184,7 @@ Adjusts the limit based on the gradient between a long-term exponentially smooth
 This matches Netflix's **Gradient2Limit** algorithm, not the deprecated v1 algorithm called GradientLimit in their package.
 ### AIMDLimit
 
-Simple additive-increase/multiplicative-decrease algorithm. Increases the limit by 1 on success and multiplies by a backoff ratio on drops or timeouts. Supports a `backoffJitter` option (default `0.02`) that adds a small random perturbation to each decrease, breaking lockstep oscillation when multiple independent clients share the same configuration.
+Simple additive-increase/multiplicative-decrease algorithm. Increases the limit by 1 on success and multiplies by `decrease.ratio` (default `0.9`) on drops or timeouts. `decrease.jitter` (default `0.02`) adds a small random perturbation to each decrease, breaking lockstep oscillation when multiple independent clients share the same configuration. Each kind of change happens at most once per flight of requests, so one overload episode's burst of drops is one decrease, not one per in-flight request.
 
 ### WindowedLimit
 
@@ -193,7 +197,7 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 
 ## Limiter building blocks
 
-- **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**, and optional **`operationNameFor`** to tag samples for group-aware limits.
+- **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**, optional **`operationNameFor`** to tag samples for group-aware limits, and optional **`stallDetection`** (see below).
 - **`AcquireStrategy`** — Two-phase admission contract. `tryReserveAllotment(context, state)` returns an `AllotmentReservation` when capacity is tentatively reserved; the limiter then calls `commit()` when admission succeeds or `cancel()` when an outer decision rejects/aborts before the allotment is returned. This lets composed strategies reserve locally without emitting metrics or waking waiters until the overall acquire succeeds.
 - **`LimitAllotment`** — Handle returned from `Limiter.acquire()`. Call exactly one release method: `releaseAndRecordSuccess()`, `releaseAndIgnore()`, or `releaseAndRecordDropped()`.
 - **`AllotmentReservation`** — Helper class for implementing two-phase `AcquireStrategy` instances. Its `commit()` and `cancel()` methods are idempotent.
@@ -201,6 +205,19 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 - **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function. Enqueue-triggered drains are coalesced and only retry the queue head, avoiding lost wakeups without fanning out retries across the whole queue.
 - **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
 - **`DelayedThenBlockingRejection`** — Two-stage behavior: unconditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
+
+## Event-loop stall detection
+
+The RTT a limiter measures is wall time between two clock reads in JS. When this thread stalls (blocking JS, a GC pause, a whole-process freeze), every response that arrived during the stall is observed late, and the limit algorithm reads that as downstream latency: one 300 ms stall can collapse a limit to its floor. Pass `stallDetection` to have the limiter keep a small stall log (one 10 ms timer, unref'd) and withhold the RTT sample of any successful request whose start or observed end fell inside a stall. The request still counts as a success and is reported on the `stall_ignored_sample` counter; drops are always recorded.
+
+```typescript
+const limiter = new Limiter({
+  limit: new GroupAwareLimit(),
+  stallDetection: { resolutionMs: 10, floorMs: 20 },
+});
+```
+
+Limiters on the default clock and timer share one log per configuration. A limiter with an injected `clock` or `timer` gets its own, on that clock, and stops it on `dispose()`.
 
 ## Redis Token Bucket
 

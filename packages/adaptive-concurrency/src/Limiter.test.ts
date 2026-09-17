@@ -702,7 +702,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     /**
      * Helper: build a limiter with AIMD-based probing and a fake timer.
-     * AIMD with `initialLimit: 1, minLimit: 0, backoffJitter: 0` collapses
+     * AIMD with `initialLimit: 1, minLimit: 0` and no jitter collapses
      * to 0 on a single drop, which makes the test scenarios easy to set up.
      */
     function makeAimdLimiter(opts?: {
@@ -715,8 +715,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         initialLimit: 1,
         minLimit: 0,
         maxLimit: 100,
-        backoffRatio: 0.9,
-        backoffJitter: 0,
+        decrease: { ratio: 0.9, jitter: 0 },
         timeout: opts?.timeout ?? 1_000,
       });
       const limiter = new Limiter<void>({
@@ -754,13 +753,13 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("does not arm a probe while requests are still inflight", async () => {
       const timer = new FakeTimer();
-      // Two-shot AIMD: initialLimit 2 takes two drops to reach 0.
+      // Two-shot AIMD: initialLimit 2 takes two drops, from two flights, to
+      // reach 0.
       const limit = new AIMDLimit({
         initialLimit: 2,
         minLimit: 0,
         maxLimit: 100,
-        backoffRatio: 0.5,
-        backoffJitter: 0,
+        decrease: { ratio: 0.5, jitter: 0 },
         timeout: 1_000,
       });
       const limiter = new Limiter<void>({
@@ -779,7 +778,16 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       assert.equal(limiter.getInflight(), 1);
       assert.equal(timer.pendingCount(), 0, "should not arm: inflight > 0");
 
-      await b.releaseAndRecordDropped();
+      // `b` was admitted before the decrease, so its drop is the same
+      // episode and does not cut the limit again. A request admitted after
+      // the decrease can.
+      await b.releaseAndIgnore();
+      assert.equal(limiter.getLimit(), 1);
+      assert.equal(timer.pendingCount(), 0, "should not arm: limit > 0");
+      const c = await limiter.acquire({});
+      assert.ok(c);
+
+      await c.releaseAndRecordDropped();
       assert.equal(limiter.getLimit(), 0);
       assert.equal(limiter.getInflight(), 0);
       assert.equal(
@@ -919,8 +927,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         initialLimit: 0,
         minLimit: 0,
         maxLimit: 100,
-        backoffRatio: 0.9,
-        backoffJitter: 0,
+        decrease: { ratio: 0.9, jitter: 0 },
         timeout: 500,
       });
       const limiter = new Limiter<void>({
@@ -1015,8 +1022,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         initialLimit: 1,
         minLimit: 0,
         maxLimit: 100,
-        backoffRatio: 0.9,
-        backoffJitter: 0,
+        decrease: { ratio: 0.9, jitter: 0 },
         timeout: 500,
       });
       const limiter = new Limiter<void>({
@@ -1757,3 +1763,205 @@ function makeRecordingMetricRegistry(
   const distribution = (): DistributionMetric => ({ addSample() {} });
   return { counter, gauge, distribution };
 }
+
+describe("Limiter stall detection", () => {
+  /**
+   * Fake clock + timer shared by the limiter and its stall log. `advance`
+   * fires due timers each at its own scheduled time; `freeze` jumps the
+   * clock without firing anything, which is what a stall looks like.
+   */
+  function fakeTime() {
+    let now = 0;
+    let nextHandle = 1;
+    const tasks = new Map<number, { fn: () => void; at: number }>();
+    const timer = {
+      setTimeout: (fn: () => void, ms: number): number => {
+        const handle = nextHandle++;
+        tasks.set(handle, { fn, at: now + ms });
+        return handle;
+      },
+      clearTimeout: (handle: number): void => {
+        tasks.delete(handle);
+      },
+    };
+    const advance = (ms: number) => {
+      const target = now + ms;
+      for (;;) {
+        let next: [number, { fn: () => void; at: number }] | undefined;
+        for (const entry of tasks) {
+          if (entry[1].at <= target && (!next || entry[1].at < next[1].at))
+            next = entry;
+        }
+        if (!next) break;
+        tasks.delete(next[0]);
+        // A timer never fires early, but a frozen clock (a stall) makes
+        // it fire late: at whatever the clock says now.
+        now = Math.max(now, next[1].at);
+        next[1].fn();
+      }
+      now = target;
+    };
+    const freeze = (ms: number) => {
+      now += ms;
+    };
+    return {
+      clock: () => now,
+      timer,
+      advance,
+      freeze,
+      pending: () => tasks.size,
+    };
+  }
+
+  function spyLimit() {
+    const samples: { startTime: number; rtt: number; didDrop: boolean }[] = [];
+    const limit: AdaptiveLimit = {
+      get currentLimit() {
+        return 10;
+      },
+      subscribe() {
+        return () => {};
+      },
+      addSample(startTime, rtt, _inflight, didDrop) {
+        samples.push({ startTime, rtt, didDrop });
+      },
+    };
+    return { limit, samples };
+  }
+
+  function countingRegistry() {
+    const counts = new Map<string, number>();
+    const registry: MetricRegistry = {
+      counter(id) {
+        return {
+          add(value: number) {
+            counts.set(id, (counts.get(id) ?? 0) + value);
+          },
+        };
+      },
+      gauge: () => ({ record() {} }),
+      distribution: () => ({ addSample() {} }),
+    };
+    return { registry, counts };
+  }
+
+  it("withholds the sample of a request released inside a stall and counts it", async () => {
+    const t = fakeTime();
+    const { limit, samples } = spyLimit();
+    const { registry, counts } = countingRegistry();
+    const limiter = new Limiter<string>({
+      limit,
+      clock: t.clock,
+      timer: t.timer,
+      metricRegistry: registry,
+      stallDetection: {},
+    });
+
+    t.advance(100);
+    const allotment = (await limiter.acquire({ context: "x" }))!;
+    // The loop stalls for 300ms; the response is released in the burst
+    // right after, while the stall log's late tick has opened a stall.
+    t.freeze(300);
+    t.advance(0);
+    await allotment.releaseAndRecordSuccess();
+
+    assert.deepEqual(samples, []);
+    assert.equal(counts.get(MetricIds.STALL_IGNORED_SAMPLE_NAME), 1);
+    assert.equal(counts.get(MetricIds.CALL_NAME), 1, "still a success");
+    limiter.dispose();
+  });
+
+  it("samples a request that started before a stall and ended after it", async () => {
+    const t = fakeTime();
+    const { limit, samples } = spyLimit();
+    const limiter = new Limiter<string>({
+      limit,
+      clock: t.clock,
+      timer: t.timer,
+      stallDetection: {},
+    });
+
+    t.advance(95);
+    const allotment = (await limiter.acquire({ context: "x" }))!;
+    t.advance(5); // a tick at 100: the loop was responsive after the acquire
+    t.freeze(300);
+    t.advance(50); // the stall closes at the first on-time tick
+    await allotment.releaseAndRecordSuccess();
+
+    assert.equal(samples.length, 1);
+    assert.equal(samples[0]!.startTime, 95);
+    limiter.dispose();
+  });
+
+  it("withholds the sample of a request that started inside a stall", async () => {
+    const t = fakeTime();
+    const { limit, samples } = spyLimit();
+    const limiter = new Limiter<string>({
+      limit,
+      clock: t.clock,
+      timer: t.timer,
+      stallDetection: {},
+    });
+
+    t.advance(100);
+    t.freeze(150);
+    // Acquired while the loop is (as the log will find out) stalled: its
+    // write may not have gone out until the stall ended.
+    const allotment = (await limiter.acquire({ context: "x" }))!;
+    t.freeze(150);
+    t.advance(100);
+    await allotment.releaseAndRecordSuccess();
+
+    assert.deepEqual(samples, []);
+    limiter.dispose();
+  });
+
+  it("always records drops, stall or not", async () => {
+    const t = fakeTime();
+    const { limit, samples } = spyLimit();
+    const limiter = new Limiter<string>({
+      limit,
+      clock: t.clock,
+      timer: t.timer,
+      stallDetection: {},
+    });
+
+    t.advance(100);
+    const allotment = (await limiter.acquire({ context: "x" }))!;
+    t.freeze(300);
+    t.advance(0);
+    await allotment.releaseAndRecordDropped();
+
+    assert.equal(samples.length, 1);
+    assert.equal(samples[0]!.didDrop, true);
+    limiter.dispose();
+  });
+
+  it("does nothing when stallDetection is omitted", async () => {
+    const t = fakeTime();
+    const { limit, samples } = spyLimit();
+    const limiter = new Limiter<string>({
+      limit,
+      clock: t.clock,
+      timer: t.timer,
+    });
+
+    assert.equal(t.pending(), 0, "no stall-log timer");
+    const allotment = (await limiter.acquire({ context: "x" }))!;
+    t.freeze(300);
+    await allotment.releaseAndRecordSuccess();
+    assert.equal(samples.length, 1);
+  });
+
+  it("dispose() stops a stall log the limiter owns", () => {
+    const t = fakeTime();
+    const limiter = new Limiter<string>({
+      clock: t.clock,
+      timer: t.timer,
+      stallDetection: {},
+    });
+    assert.equal(t.pending(), 1);
+    limiter.dispose();
+    assert.equal(t.pending(), 0);
+  });
+});

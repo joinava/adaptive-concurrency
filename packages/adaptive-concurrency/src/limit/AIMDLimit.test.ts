@@ -2,12 +2,27 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AIMDLimit } from "./AIMDLimit.js";
 
+/**
+ * Feeds `count` samples from consecutive flights: each sample starts after
+ * the previous one ended, so the epoch gate admits every one of them.
+ */
+function feedFlights(
+  limit: AIMDLimit,
+  count: number,
+  rtt: number,
+  inflightFor: () => number,
+  didDrop: boolean,
+) {
+  for (let i = 0; i < count; i++) {
+    limit.addSample(i * rtt, rtt, inflightFor(), didDrop);
+  }
+}
+
 describe("AIMDLimit", () => {
   it("should decrease limit on drop", () => {
     const limit = new AIMDLimit({
       initialLimit: 100,
-      backoffRatio: 0.9,
-      backoffJitter: 0,
+      decrease: { ratio: 0.9, jitter: 0 },
     });
 
     limit.addSample(0, 1, 100, true);
@@ -17,8 +32,7 @@ describe("AIMDLimit", () => {
   it("should decrease limit when RTT exceeds timeout", () => {
     const limit = new AIMDLimit({
       initialLimit: 100,
-      backoffRatio: 0.9,
-      backoffJitter: 0,
+      decrease: { ratio: 0.9, jitter: 0 },
       timeout: 1000,
     });
 
@@ -31,8 +45,7 @@ describe("AIMDLimit", () => {
     for (let trial = 0; trial < 50; trial++) {
       const limit = new AIMDLimit({
         initialLimit: 1000,
-        backoffRatio: 0.9,
-        backoffJitter: 0.05,
+        decrease: { ratio: 0.9, jitter: 0.05 },
         minLimit: 1,
         maxLimit: 2000,
       });
@@ -65,21 +78,34 @@ describe("AIMDLimit", () => {
     assert.equal(limit.currentLimit, 20);
   });
 
+  it("minUtilizationToGrow sets the inflight fraction needed to grow", () => {
+    const limit = new AIMDLimit({ initialLimit: 20, minUtilizationToGrow: 1 });
+
+    limit.addSample(0, 1, 19, false);
+    assert.equal(limit.currentLimit, 20, "19 of 20 in flight: app-limited");
+
+    limit.addSample(10, 1, 20, false);
+    assert.equal(limit.currentLimit, 21, "20 of 20 in flight: grow");
+
+    assert.throws(
+      () => new AIMDLimit({ minUtilizationToGrow: 0 }),
+      /minUtilizationToGrow must be in \(0, 1\]/,
+    );
+    assert.throws(
+      () => new AIMDLimit({ minUtilizationToGrow: 1.1 }),
+      /minUtilizationToGrow must be in \(0, 1\]/,
+    );
+  });
+
   it("should respect minLimit", () => {
     const limit = new AIMDLimit({
       initialLimit: 20,
       minLimit: 10,
-      backoffRatio: 0.5,
-      backoffJitter: 0,
+      decrease: { ratio: 0.5, jitter: 0 },
     });
 
-    for (let i = 0; i < 20; i++) {
-      limit.addSample(0, 1, limit.currentLimit, true);
-    }
-    assert.ok(
-      limit.currentLimit >= 10,
-      `Limit ${limit.currentLimit} should not be below minLimit 10`,
-    );
+    feedFlights(limit, 20, 1, () => limit.currentLimit, true);
+    assert.equal(limit.currentLimit, 10);
   });
 
   it("should respect maxLimit", () => {
@@ -88,23 +114,72 @@ describe("AIMDLimit", () => {
       maxLimit: 30,
     });
 
-    for (let i = 0; i < 100; i++) {
-      limit.addSample(0, 1, limit.currentLimit, false);
-    }
-    assert.ok(
-      limit.currentLimit <= 30,
-      `Limit ${limit.currentLimit} should not exceed maxLimit 30`,
-    );
+    feedFlights(limit, 100, 1, () => limit.currentLimit, false);
+    assert.equal(limit.currentLimit, 30);
   });
 
-  it("should throw on invalid backoffRatio", () => {
+  describe("one change per flight", () => {
+    it("a burst of drops from one flight decreases the limit once", () => {
+      const limit = new AIMDLimit({
+        initialLimit: 100,
+        minLimit: 1,
+        decrease: { ratio: 0.9, jitter: 0 },
+      });
+
+      // Twenty requests all started at t=0 and all dropped: one episode.
+      for (let i = 0; i < 20; i++) {
+        limit.addSample(0, 50, 100, true);
+      }
+      assert.equal(limit.currentLimit, 90);
+
+      // A drop from a request started after the decrease is a new episode.
+      limit.addSample(60, 50, 90, true);
+      assert.equal(limit.currentLimit, 81);
+    });
+
+    it("successes from one flight increase the limit once", () => {
+      const limit = new AIMDLimit({ initialLimit: 20, maxLimit: 200 });
+
+      for (let i = 0; i < 20; i++) {
+        limit.addSample(0, 50, 20, false);
+      }
+      assert.equal(limit.currentLimit, 21);
+
+      limit.addSample(60, 50, 21, false);
+      assert.equal(limit.currentLimit, 22);
+    });
+
+    it("gates increases and decreases independently", () => {
+      const limit = new AIMDLimit({
+        initialLimit: 100,
+        minLimit: 1,
+        maxLimit: 200,
+        decrease: { ratio: 0.9, jitter: 0 },
+      });
+
+      limit.addSample(0, 10, 100, false); // increase -> 101
+      // A drop from the same flight is not blocked by the increase.
+      limit.addSample(0, 10, 101, true); // decrease -> 90
+      assert.equal(limit.currentLimit, 90);
+    });
+  });
+
+  it("should throw on invalid decrease options", () => {
     assert.throws(
-      () => new AIMDLimit({ backoffRatio: 1.0 }),
-      /Backoff ratio must be in the range/,
+      () => new AIMDLimit({ decrease: { ratio: 1.0 } }),
+      /decrease\.ratio must be in the range/,
     );
     assert.throws(
-      () => new AIMDLimit({ backoffRatio: 0.4 }),
-      /Backoff ratio must be in the range/,
+      () => new AIMDLimit({ decrease: { ratio: 0.4 } }),
+      /decrease\.ratio must be in the range/,
+    );
+    assert.throws(
+      () => new AIMDLimit({ decrease: { jitter: -0.01 } }),
+      /decrease\.jitter must be in the range/,
+    );
+    assert.throws(
+      () => new AIMDLimit({ decrease: { jitter: 0.06 } }),
+      /decrease\.jitter must be in the range/,
     );
   });
 
@@ -112,17 +187,6 @@ describe("AIMDLimit", () => {
     assert.throws(
       () => new AIMDLimit({ timeout: 0 }),
       /Timeout must be positive/,
-    );
-  });
-
-  it("should throw on invalid backoffJitter", () => {
-    assert.throws(
-      () => new AIMDLimit({ backoffJitter: -0.01 }),
-      /backoffJitter must be in the range/,
-    );
-    assert.throws(
-      () => new AIMDLimit({ backoffJitter: 0.06 }),
-      /backoffJitter must be in the range/,
     );
   });
 

@@ -20,6 +20,12 @@ export const MetricIds = {
   CONGESTION_SIGNAL_NAME: "congestion_signal",
   WARMED_GROUPS_COUNT_NAME: "warmed_groups_count",
   GROUP_RTT_RATIO_NAME: "group_rtt_ratio",
+  /**
+   * Successful calls whose RTT sample was withheld from the limit algorithm
+   * because an event-loop stall delayed the request (see
+   * `LimiterOptions.stallDetection`).
+   */
+  STALL_IGNORED_SAMPLE_NAME: "stall_ignored_sample",
 } as const;
 
 /**

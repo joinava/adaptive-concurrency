@@ -43,6 +43,7 @@ export {
 
 // Limit algorithms
 export { AIMDLimit, type AIMDLimitOptions } from "./limit/AIMDLimit.js";
+export type { AppLimitedOptions } from "./limit/appLimited.js";
 export { FixedLimit } from "./limit/FixedLimit.js";
 export {
   GradientLimit,
@@ -80,6 +81,7 @@ export {
   squareRoot,
   squareRootWithBaseline,
 } from "./utils/index.js";
+export type { MultiplicativeDecreaseOptions } from "./utils/multiplicativeDecrease.js";
 
 export * from "./limiter/factories/index.js";
 
