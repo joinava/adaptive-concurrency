@@ -617,6 +617,63 @@ describe("RedisTokenBucketStrategy", () => {
       );
     });
 
+    it("reserves nothing when the predicate throws, so nothing can leak", async () => {
+      const client = makeMockClient({ responses: [] });
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 5,
+        refillIntervalMs: 1000,
+      });
+      const inner = makeInnerStub<Ctx>();
+      const strategy = new RedisTokenBucketStrategy<Ctx>({
+        bucket,
+        inner: inner.strategy,
+        appliesTo: () => {
+          throw new Error("predicate exploded");
+        },
+      });
+
+      await assert.rejects(
+        async () =>
+          await strategy.tryReserveAllotment({ partition: "bulk" }, fakeState),
+        /predicate exploded/,
+      );
+
+      // The predicate is evaluated before the inner reserves. Were it
+      // evaluated after, this reservation would exist with no one holding a
+      // reference to commit or cancel it, permanently claiming a permit.
+      assert.deepEqual(inner.reserveCalls, [], "the inner never reserved");
+      assert.deepEqual(inner.cancelCalls, []);
+      assert.deepEqual(inner.commitCalls, []);
+    });
+
+    it("does not resolve a bucket key for a context it does not govern", async () => {
+      const client = makeMockClient({ responses: [] });
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 5,
+        refillIntervalMs: 1000,
+      });
+      const inner = makeInnerStub<Ctx>();
+      const strategy = new RedisTokenBucketStrategy<Ctx>({
+        bucket,
+        inner: inner.strategy,
+        appliesTo: () => false,
+        keyResolver: () => {
+          throw new Error("key resolver must not run for an exempt context");
+        },
+      });
+
+      const context: Ctx = { partition: "interactive" };
+      const reservation = await strategy.tryReserveAllotment(
+        context,
+        fakeState,
+      );
+
+      assert.ok(reservation, "an exempt context is admitted");
+      assert.deepEqual(inner.reserveCalls, [context]);
+    });
+
     it("gates every context by default", async () => {
       const client = makeMockClient({ responses: [[1, 0]] });
       const bucket = new RedisTokenBucket(client, {

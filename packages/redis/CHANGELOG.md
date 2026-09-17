@@ -17,8 +17,10 @@ Releases before 0.3.0 have no entries; see the git history.
   contexts the bucket governs. It defaults to every context, so existing
   callers do not change. Return `false` to exempt a context: the inner strategy
   still reserves and bounds it, but the bucket is skipped, so no token is taken
-  and none has to be refunded. The predicate runs after the inner reserves, so
-  an exempt context is still bounded locally.
+  and none has to be refunded. An exempt context is still bounded locally,
+  because it still goes through the inner strategy. The predicate and the key
+  resolver both run before the inner reserves, so a throw from either cannot
+  strand a reservation, and an exempt context never resolves a bucket key.
 
   The intended shape is a sub-budget. Nest the strategy inside an outer one
   whose bucket governs every context, and let the inner bucket meter one class
@@ -29,4 +31,7 @@ Releases before 0.3.0 have no entries; see the git history.
   The deprecated `@zingage/adaptive-concurrency-redis` fork carried this
   behaviour from its 0.1.1 under the name `shouldUseBucket`, but it was never
   in this repository, so that fork was not a pure rename of this source. The
-  logic here is the same; only the name differs.
+  admission logic here matches the fork's. It differs in two deliberate ways:
+  the option's name, and the point at which the predicate and the key resolver
+  are evaluated. The fork ran both around the inner reservation, which strands
+  that reservation if either throws.

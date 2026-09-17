@@ -18,8 +18,8 @@ import type { RedisTokenBucket } from "./RedisTokenBucket.js";
  * governs every context. Pass `appliesTo` to narrow it: a context the predicate
  * rejects keeps the inner strategy's protections (per-process adaptive limit,
  * partition fairness) but skips the bucket entirely, so no token is taken and
- * none has to be refunded. The predicate runs *after* the inner reserves, so an
- * exempt context is still bounded locally.
+ * none has to be refunded. An exempt context is still bounded locally, because
+ * it still goes through the inner strategy.
  *
  * The safe shape is a sub-budget. Nest this strategy inside an outer one whose
  * bucket still governs every context, and let the inner bucket meter one class
@@ -144,7 +144,14 @@ export class RedisTokenBucketStrategy<ContextT> {
     context: ContextT,
     state: LimiterState,
   ): Promise<AllotmentReservation | undefined> {
-    const key = this.#keyResolver(context);
+    // Both callbacks run before the inner reserves. Reserving first and then
+    // asking whether the bucket applies would strand the inner reservation if
+    // the predicate threw, and a context the bucket does not govern has no
+    // reason to resolve a bucket key at all. `undefined` reads as "not
+    // governed" unambiguously, because `keyResolver` returns a string.
+    const key = this.#appliesTo(context)
+      ? this.#keyResolver(context)
+      : undefined;
 
     const reservation = await this.#inner.tryReserveAllotment(context, state);
     if (!reservation) {
@@ -153,7 +160,7 @@ export class RedisTokenBucketStrategy<ContextT> {
 
     // A context this bucket does not govern keeps the inner reservation and
     // skips the bucket entirely (no token consumed, nothing to refund).
-    if (!this.#appliesTo(context)) {
+    if (key === undefined) {
       return reservation;
     }
 
