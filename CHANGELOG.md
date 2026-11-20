@@ -9,6 +9,36 @@ The package is pre-1.0, so a minor version bump can contain breaking changes.
 
 Releases before 0.14.0 have no entries; see the git history.
 
+## [Unreleased]
+
+### Breaking
+
+- `PartitionedStrategy` splits the global limit among partitions by the
+  largest-remainder method. Each partition gets the floor of
+  `globalLimit * percent`, and the leftover slots go to the largest fractional
+  remainders, with ties to the partition declared first. The shares were
+  `max(1, ceil(globalLimit * percent))` each.
+  - The shares never sum to more than the global limit, and a share can be 0.
+    With 60%/20%/20% partitions, a limit of 1 gives 1/0/0 (was 1/1/1).
+  - Declaration order in `partitions` is now the tie-break, so declare
+    partitions in priority order.
+  - A `capped` burst is `ceil(globalLimit * percent * maxBurstMultiplier)`,
+    from the unrounded share (was `ceil(limitAtGlobalSaturation *
+maxBurstMultiplier)`).
+  - Below saturation, a `capped` or `none` partition with a nonzero percent
+    may still use one slot of slack, so a share of 0 cannot starve it.
+  - A partition with a percent of 0 has a share of 0 (was 1).
+
+### Fixed
+
+- A `PartitionedStrategy` admitted requests at a global limit of 0. At limit 0
+  every acquire takes the saturation path, and the floor of 1 let each
+  partition admit one request. Now no partition is admitted at limit 0, so
+  the recovery probe controls when traffic resumes.
+- At a small global limit, the floor of 1 let every partition admit a request
+  at saturation, so a pod at limit 1 could run one request per partition and
+  partition priority had no effect.
+
 ## [0.14.0] - 2026-09-16
 
 ### Breaking

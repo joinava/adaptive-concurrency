@@ -23,7 +23,7 @@ export type PartitionConfig = {
    * - `{ kind: "unbounded" }` (default): current behavior; any partition may
    *   consume all global slack.
    * - `{ kind: "capped", maxBurstMultiplier }`: partition may burst, but only
-   *   up to `ceil(limitAtGlobalSaturation * maxBurstMultiplier)`.
+   *   up to `ceil(globalLimit * percent * maxBurstMultiplier)`.
    * - `{ kind: "none" }`: no bursting; partition cannot exceed its
    *   `limitAtGlobalSaturation`, even when global slack exists.
    */
@@ -37,18 +37,32 @@ export type PartitionConfig = {
 /**
  * ## Partitioned acquire strategy (guaranteed share + bursting)
  *
- * Named partitions get a configured percentage of the global limit. Each
- * percentage is converted to a per-partition **limitAtGlobalSaturation** used
- * only when the limiter is globally saturated: `limitAtGlobalSaturation =
- * max(1, ceil(globalLimit * percent))`.
+ * Named partitions get a configured percentage of the global limit. The
+ * percentages are converted to per-partition **limitAtGlobalSaturation** values,
+ * used only when the limiter is globally saturated. The conversion splits
+ * `floor(globalLimit * sum(percent))` whole slots among the partitions by the
+ * largest-remainder method:
+ *
+ * 1. Each partition gets `floor(globalLimit * percent)` slots.
+ * 2. The slots left over go one each to the partitions with the largest
+ *    fractional remainders. A tie goes to the partition declared first in
+ *    `partitions`, so declare partitions in priority order.
+ *
+ * So the limitsAtGlobalSaturation never sum to more than the global limit, and
+ * a partition's share can be 0. With 60%/20%/20% partitions, a global limit of
+ * 1 gives 1/0/0, a limit of 2 gives 1/1/0, and a limit of 5 gives 3/1/1. At a
+ * global limit of 0, every share is 0, so nothing is admitted at saturation.
  *
  * Admission policy:
  * - If `globalInflight < globalLimit`, admission is controlled by partition
  *   burst policy:
  *   - `unbounded` (default): always admit while global slack exists.
  *   - `capped`: admit up to
- *     `ceil(limitAtGlobalSaturation * maxBurstMultiplier)`.
+ *     `max(limitAtGlobalSaturation, ceil(globalLimit * percent * maxBurstMultiplier))`.
  *   - `none`: admit only up to `limitAtGlobalSaturation`.
+ *   - For `capped` and `none`, a partition with a nonzero percent may always
+ *     use at least one slot of global slack, even when its share rounds to 0.
+ *     Otherwise it could never run at a small global limit.
  *
  * - If `globalInflight >= globalLimit`, admission is checked against the
  *   resolved partition's limitAtGlobalSaturation only.
@@ -74,9 +88,10 @@ export type PartitionConfig = {
  *
  * - There is no cross-partition work-stealing at saturation.
  *
- * - Sum of limitsAtGlobalSaturation can exceed global limit due to rounding,
- *   and total concurrent acquires can substantially exceed global limit due to
- *   bursting. This is usually temporary as RTT rises and excess work is shed by
+ * - Total concurrent acquires can exceed the global limit: a partition below its
+ *   share is admitted at saturation even when other partitions burst into the
+ *   slack. The excess is at most the sum of the shares, so at most the global
+ *   limit. This is usually temporary as RTT rises and excess work is shed by
  *   adaptive limiting over time.
  *
  * Each partition tracks committed inflight and speculative reservations
@@ -93,6 +108,8 @@ export class PartitionedStrategy<
     PartitionName,
     Partition<PartitionName>
   >;
+  /** The known partitions in declaration order, which is the tie-break order. */
+  private readonly orderedPartitions: readonly Partition<PartitionName>[];
   private readonly unknownPartition: Partition<"unknown">;
   private readonly partitionResolver: (
     context: ContextT,
@@ -138,27 +155,30 @@ export class PartitionedStrategy<
 
     this.partitionResolver = options.partitionResolver;
 
-    this.knownPartitions = new Map(
-      partitionEntries.map(([name, cfg]) => [
-        name,
+    const initialShares = apportionGlobalLimit(
+      initialLimit,
+      partitionEntries.map(([, cfg]) => cfg.percent),
+    );
+    this.orderedPartitions = partitionEntries.map(
+      ([name, cfg], i) =>
         new Partition({
           name,
           percent: cfg.percent,
           burstMode: cfg.burstMode ?? { kind: "unbounded" },
-          initialLimitAtGlobalSaturation:
-            partitionLimitAtGlobalSaturationForGlobal(
-              initialLimit,
-              cfg.percent,
-            ),
+          initialGlobalLimit: initialLimit,
+          initialLimitAtGlobalSaturation: initialShares[i]!,
           registry,
         }),
-      ]),
+    );
+    this.knownPartitions = new Map(
+      this.orderedPartitions.map((partition) => [partition.name, partition]),
     );
 
     this.unknownPartition = new Partition({
       name: "unknown",
       percent: 0,
       burstMode: { kind: "unbounded" },
+      initialGlobalLimit: initialLimit,
       // Java never calls updateLimit on unknown; limitAtGlobalSaturation stays
       // 0, so reservations always fail at global saturation.
       initialLimitAtGlobalSaturation: 0,
@@ -190,9 +210,13 @@ export class PartitionedStrategy<
   }
 
   onLimitChanged(_oldLimit: number, newLimit: number): void {
-    for (const [, partition] of this.knownPartitions) {
-      partition.updateLimitAtGlobalSaturation(newLimit);
-    }
+    const shares = apportionGlobalLimit(
+      newLimit,
+      this.orderedPartitions.map((partition) => partition.percent),
+    );
+    this.orderedPartitions.forEach((partition, i) => {
+      partition.updateLimitAtGlobalSaturation(newLimit, shares[i]!);
+    });
   }
 
   /**
@@ -228,11 +252,43 @@ export class PartitionedStrategy<
   }
 }
 
-function partitionLimitAtGlobalSaturationForGlobal(
-  totalGlobalLimit: number,
-  percent: number,
-): number {
-  return Math.max(1, Math.ceil(totalGlobalLimit * percent));
+/**
+ * Absorbs floating-point error in `limit * percent`, so that (for example)
+ * `3 * 0.1` floors to 0 and `10 * 0.3` floors to 3, not to 2.
+ */
+const QUOTA_EPSILON = 1e-9;
+
+/**
+ * Splits `floor(globalLimit * sum(percents))` whole slots among partitions by
+ * the largest-remainder method. Each partition gets the floor of its quota,
+ * then the leftover slots go one each to the largest fractional remainders.
+ * A tie goes to the lower index. The result never sums to more than the
+ * global limit.
+ */
+export function apportionGlobalLimit(
+  globalLimit: number,
+  percents: readonly number[],
+): number[] {
+  const limit = Math.max(0, Math.floor(globalLimit));
+  const quotas = percents.map((percent) => limit * percent);
+  const floors = quotas.map((quota) => Math.floor(quota + QUOTA_EPSILON));
+  const total = Math.min(
+    limit,
+    Math.floor(quotas.reduce((sum, quota) => sum + quota, 0) + QUOTA_EPSILON),
+  );
+  const leftover = total - floors.reduce((sum, floor) => sum + floor, 0);
+  if (leftover <= 0) {
+    return floors;
+  }
+
+  const winners = new Set(
+    quotas
+      .map((quota, index) => ({ index, remainder: quota - floors[index]! }))
+      .sort((a, b) => b.remainder - a.remainder || a.index - b.index)
+      .slice(0, leftover)
+      .map(({ index }) => index),
+  );
+  return floors.map((floor, index) => (winners.has(index) ? floor + 1 : floor));
 }
 
 class Partition<PartitionName extends string = string> {
@@ -248,6 +304,7 @@ class Partition<PartitionName extends string = string> {
   private _inflight = 0;
   private _reserved = 0;
   private _limitAtGlobalSaturation: number;
+  private _globalLimit: number;
 
   constructor(init: {
     name: PartitionName;
@@ -256,6 +313,8 @@ class Partition<PartitionName extends string = string> {
       | { kind: "unbounded" }
       | { kind: "capped"; maxBurstMultiplier: number }
       | { kind: "none" };
+    /** The global limit that the initial share was computed from. */
+    initialGlobalLimit: number;
     /** Per-partition slot cap when the global limit is saturated. */
     initialLimitAtGlobalSaturation: number;
     registry: MetricRegistry;
@@ -269,6 +328,7 @@ class Partition<PartitionName extends string = string> {
     this.percent = init.percent;
     this.burstMode = init.burstMode;
     this._limitAtGlobalSaturation = init.initialLimitAtGlobalSaturation;
+    this._globalLimit = init.initialGlobalLimit;
 
     if (
       this.burstMode.kind === "capped" &&
@@ -288,16 +348,16 @@ class Partition<PartitionName extends string = string> {
   }
 
   /**
-   * Recompute this partition's limitAtGlobalSaturation from global limit.
-   * Rounds up
-   * and ensures at least 1 for non-zero **percent**; sums across partitions may
-   * exceed the global limit.
+   * Stores this partition's share of a new global limit. The strategy computes
+   * every partition's share together with {@link apportionGlobalLimit}, so the
+   * shares never sum to more than the global limit.
    */
-  updateLimitAtGlobalSaturation(totalGlobalLimit: number): void {
-    this._limitAtGlobalSaturation = partitionLimitAtGlobalSaturationForGlobal(
-      totalGlobalLimit,
-      this.percent,
-    );
+  updateLimitAtGlobalSaturation(
+    totalGlobalLimit: number,
+    limitAtGlobalSaturation: number,
+  ): void {
+    this._globalLimit = totalGlobalLimit;
+    this._limitAtGlobalSaturation = limitAtGlobalSaturation;
     this.limitAtGlobalSaturationGauge.record(this._limitAtGlobalSaturation);
   }
 
@@ -366,14 +426,22 @@ class Partition<PartitionName extends string = string> {
       return Number.POSITIVE_INFINITY;
     }
 
+    // A partition with a nonzero percent may always use one slot of global
+    // slack. Its share can round to 0 at a small global limit, and without
+    // this floor a `capped` or `none` partition could then never run.
+    const slackFloor = this.percent > 0 ? 1 : 0;
+
     if (this.burstMode.kind === "none") {
-      return this._limitAtGlobalSaturation;
+      return Math.max(slackFloor, this._limitAtGlobalSaturation);
     }
 
+    // Uses the unrounded share, so the cap does not jump with share rounding.
     return Math.max(
+      slackFloor,
       this._limitAtGlobalSaturation,
       Math.ceil(
-        this._limitAtGlobalSaturation * this.burstMode.maxBurstMultiplier,
+        this._globalLimit * this.percent * this.burstMode.maxBurstMultiplier -
+          QUOTA_EPSILON,
       ),
     );
   }
