@@ -91,10 +91,9 @@ try {
   const result = await callWithLimiter({ context: "tenant-a" });
 
   if (!result.ok) {
-    // Callback was not run because the limiter gave no allotment: calls to
-    // the downstream were already at the max concurrency, and the limiter
-    // either wasn't set up to queue further acquire calls or gave up waiting.
-    // `result.error` is the `allotmentUnavailableError`.
+    // Callback was not run because calls to the downstream were already
+    // at the max concurrency (and the limiter wasn't set up to queue further
+    // acquire calls)
   } else {
     // `result.value` is the value inside `success` / `ignore`
   }

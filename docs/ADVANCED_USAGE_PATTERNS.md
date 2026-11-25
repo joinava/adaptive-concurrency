@@ -50,8 +50,9 @@ const result = await callWithLimiter(
 );
 
 if (!result.ok) {
-  // Callback was not run because the limiter gave no allotment.
-  // `result.error` is the `allotmentUnavailableError`.
+  // Callback was not run because calls to the downstream were already
+  // at the max concurrency (and the limiter wasn't set up to queue further
+  // acquire calls)
 } else {
   // `result.value` is the value inside `success` / `ignore`
 }
