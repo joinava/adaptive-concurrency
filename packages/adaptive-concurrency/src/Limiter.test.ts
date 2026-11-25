@@ -723,11 +723,11 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
       const rejectionStrategy: AllotmentUnavailableStrategy<void> = {
         async onAllotmentUnavailable(_ctx, retry) {
-          const allotment = await retry(undefined);
+          const retried = await retry(undefined);
           resolveRetryStarted?.();
           await returnFromStrategy;
-          assert.ok(allotment);
-          return { ok: true, value: allotment };
+          assert.ok(retried.ok);
+          return retried;
         },
         onAllotmentReleased() {},
       };
@@ -1260,7 +1260,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
           async onAllotmentUnavailable(_ctx, retry) {
             for (let attempt = 0; attempt < 3; attempt++) {
               const r = await retry(undefined);
-              if (r) return { ok: true, value: r };
+              if (r.ok) return r;
             }
             return {
               ok: false,
@@ -1306,11 +1306,11 @@ describe("Limiter (default SemaphoreStrategy)", () => {
             // First retry will fail (slot still held). After we release the
             // holder, the second retry succeeds.
             const first = await retry(undefined);
-            if (first) return { ok: true, value: first };
+            if (first.ok) return first;
             await releaseHolder();
             const second = await retry(undefined);
-            assert.ok(second);
-            return { ok: true, value: second };
+            assert.ok(second.ok);
+            return second;
           },
           onAllotmentReleased() {},
         },
@@ -1838,11 +1838,11 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         metricRegistry: makeRecordingMetricRegistry(events),
         allotmentUnavailableStrategy: {
           async onAllotmentUnavailable(_ctx, retry) {
-            const allotment = await retry(undefined);
+            const retried = await retry(undefined);
             resolveRetryStarted?.();
             await returnFromStrategy;
-            assert.ok(allotment);
-            return { ok: true, value: allotment };
+            assert.ok(retried.ok);
+            return retried;
           },
           onAllotmentReleased() {},
         },

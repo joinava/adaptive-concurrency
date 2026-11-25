@@ -31,9 +31,11 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
   `AcquireResult`. To give up, it resolves with `{ ok: false, error }`, where
   `error` is an `allotmentUnavailableError` that it makes. On abort, it
   rejects with the signal's `reason`. Its `retry` callback is typed
-  `RetryAcquire<ContextT>` and still resolves with `undefined` while the
-  acquire strategy refuses. A strategy that resolves with anything that is
-  not a result makes `acquire()` reject with a `TypeError`.
+  `RetryAcquire<ContextT>` and also returns an `AcquireResult`: it resolves
+  with `{ ok: false, error }` while the acquire strategy still refuses or
+  after the signal aborts, and the strategy decides what to do next. A
+  strategy that resolves with anything that is not a result makes
+  `acquire()` reject with a `TypeError`.
 - `withLimiter` and `makeLimitedFunction` resolve with a `Result<T>`:
   `{ ok: true, value }`, or `acquire()`'s `{ ok: false, error }` when the
   limiter gave no allotment and `fn` did not run. If `acquire()` rejects, for

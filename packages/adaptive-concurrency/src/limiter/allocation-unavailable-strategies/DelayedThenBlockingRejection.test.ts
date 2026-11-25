@@ -22,6 +22,12 @@ async function assertUnavailable(
   assert.ok(!result.ok && isAllotmentUnavailableError(result.error));
 }
 
+/** A retry that still gets no allotment. */
+const STILL_REFUSED = {
+  ok: false,
+  error: allotmentUnavailableError({ message: "still refused" }),
+} as const;
+
 describe("DelayedThenBlockingRejection", () => {
   it("applies delay before delegating to blocking strategy", async () => {
     let delegateCalledAt = -1;
@@ -45,7 +51,7 @@ describe("DelayedThenBlockingRejection", () => {
 
     const start = performance.now();
     await assertUnavailable(
-      strategy.onAllotmentUnavailable("a", async () => undefined),
+      strategy.onAllotmentUnavailable("a", async () => STILL_REFUSED),
     );
     const elapsed = delegateCalledAt - start;
     assert.ok(
@@ -114,10 +120,9 @@ describe("DelayedThenBlockingRejection", () => {
 
     const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable(_context: string, retry: RetryAcquire<string>) {
-        return retry("a").then((value) => ({
-          ok: true,
-          value: value ?? allotment,
-        }));
+        return retry("a").then((retried) =>
+          retried.ok ? retried : { ok: true, value: allotment },
+        );
       },
       onAllotmentReleased() {},
     };
@@ -131,7 +136,7 @@ describe("DelayedThenBlockingRejection", () => {
 
     const out = await strategy.onAllotmentUnavailable(
       "a",
-      async () => undefined,
+      async () => STILL_REFUSED,
     );
     assert.ok(out.ok);
     assert.equal(out.value, allotment);
@@ -161,7 +166,7 @@ describe("DelayedThenBlockingRejection", () => {
     const reason = new Error("aborted by test");
     const result = strategy.onAllotmentUnavailable(
       "a",
-      async () => undefined,
+      async () => STILL_REFUSED,
       controller.signal,
     );
     controller.abort(reason);

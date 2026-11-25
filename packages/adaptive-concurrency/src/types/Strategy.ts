@@ -72,12 +72,12 @@ export type AcquireResult = Promise<Result<LimitAllotment>>;
 /**
  * One more attempt to get an allotment, which an
  * {@link AllotmentUnavailableStrategy} calls while it waits. It resolves with
- * `undefined` when the acquire strategy still refuses: that is not a final
- * answer, so the waiting strategy decides what to do next.
+ * the same {@link AcquireResult} as `Limiter.acquire`. `{ ok: false, error }`
+ * means that the acquire strategy still refuses, or that the caller's signal
+ * has aborted. That is not a final answer: the waiting strategy decides what
+ * to do next, and it can return this result as its own.
  */
-export type RetryAcquire<ContextT> = (
-  context: ContextT,
-) => Promise<LimitAllotment | undefined>;
+export type RetryAcquire<ContextT> = (context: ContextT) => AcquireResult;
 
 /**
  * Read-only view of the limiter's current state, provided to strategies so
@@ -158,8 +158,8 @@ export type AllotmentUnavailableStrategy<ContextT> = {
    *   expected to call later if/when a slot might have opened up. The retry
    *   runs {@link AcquireStrategy.tryReserveAllotment} and, if it grants,
    *   commits the reservation and returns a ready-to-use allotment with all
-   *   required wrapping. It resolves with `undefined` if the acquire
-   *   strategy still refuses.
+   *   required wrapping. It resolves with `{ ok: false, error }` if the
+   *   acquire strategy still refuses.
    * @param signal Optional abort signal from the caller.
    */
   onAllotmentUnavailable(

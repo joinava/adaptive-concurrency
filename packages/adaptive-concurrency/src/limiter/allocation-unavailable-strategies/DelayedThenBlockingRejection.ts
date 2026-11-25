@@ -30,10 +30,10 @@ export class DelayedThenBlockingRejection<
     signal?: AbortSignal,
   ): AcquireResult {
     await this.delayStrategy.delay(context, signal);
-    const allotment = await retry(context);
+    const retried = await retry(context);
 
-    if (allotment) {
-      return { ok: true, value: allotment };
+    if (retried.ok) {
+      return retried;
     }
 
     signal?.throwIfAborted();
