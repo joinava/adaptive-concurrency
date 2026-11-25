@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makeLifoBlockingLimiter } from "./makeLifoBlockingLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 
 describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () => {
   it("acquires immediately when under limit", async () => {
@@ -42,7 +43,7 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     assert.deepEqual(order, ["newest", "oldest"]);
   });
 
-  it("returns undefined when backlog timeout is reached", async () => {
+  it("rejects with an unavailable allotment when backlog timeout is reached", async () => {
     const limiter = makeLifoBlockingLimiter<string>({
       backlogTimeout: 50,
       limiter: { limit: new FixedLimit(1) },
@@ -52,13 +53,15 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     assert.ok(first);
 
     const start = performance.now();
-    const out = await limiter.acquire({ context: "b" });
+    await assert.rejects(
+      limiter.acquire({ context: "b" }),
+      isAllotmentUnavailableError,
+    );
     const elapsed = performance.now() - start;
-    assert.equal(out, undefined);
     assert.ok(elapsed >= 35);
   });
 
-  it("returns undefined when backlog size is exceeded", async () => {
+  it("rejects with an unavailable allotment when backlog size is exceeded", async () => {
     const limiter = makeLifoBlockingLimiter<string>({
       backlogSize: 1,
       backlogTimeout: 5_000,
@@ -69,14 +72,16 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     assert.ok(first);
 
     const inBacklog = limiter.acquire({ context: "b" });
-    const overflow = await limiter.acquire({ context: "c" });
-    assert.equal(overflow, undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "c" }),
+      isAllotmentUnavailableError,
+    );
 
     await first!.releaseAndRecordSuccess();
     assert.ok(await inBacklog);
   });
 
-  it("returns undefined when aborted while waiting", async () => {
+  it("rejects with the abort reason when aborted while waiting", async () => {
     const limiter = makeLifoBlockingLimiter<string>({
       backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
@@ -89,7 +94,7 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     const waiting = limiter.acquire({ context: "b", signal: ac.signal });
     setTimeout(() => ac.abort(), 20);
 
-    assert.equal(await waiting, undefined);
+    await assert.rejects(waiting, { name: "AbortError" });
   });
 
   it("throws when backlogTimeout exceeds max timeout", async () => {

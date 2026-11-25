@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makePartitionedBlockingLimiter } from "./makePartitionedBlockingLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 
 describe("makePartitionedBlockingLimiter", () => {
   it("acquires immediately when under limit", async () => {
@@ -33,7 +34,7 @@ describe("makePartitionedBlockingLimiter", () => {
     await second!.releaseAndRecordSuccess();
   });
 
-  it("returns undefined on backlog timeout", async () => {
+  it("rejects with an unavailable allotment on backlog timeout", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
       backlogTimeout: 100,
       limiter: { limit: new FixedLimit(1) },
@@ -45,9 +46,8 @@ describe("makePartitionedBlockingLimiter", () => {
     assert.ok(first);
 
     const start = performance.now();
-    const second = await limiter.acquire({ context: "a" });
+    await assert.rejects(limiter.acquire({ context: "a" }), isAllotmentUnavailableError);
     const elapsed = performance.now() - start;
-    assert.equal(second, undefined);
     assert.ok(elapsed >= 50);
   });
 
@@ -107,7 +107,7 @@ describe("makePartitionedBlockingLimiter", () => {
     await second!.releaseAndRecordSuccess();
   });
 
-  it("returns undefined when aborted while waiting", async () => {
+  it("rejects with the abort reason when aborted while waiting", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
       backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
@@ -120,6 +120,6 @@ describe("makePartitionedBlockingLimiter", () => {
     const ac = new AbortController();
     const waiting = limiter.acquire({ context: "a", signal: ac.signal });
     setTimeout(() => ac.abort(), 20);
-    assert.equal(await waiting, undefined);
+    await assert.rejects(waiting, { name: "AbortError" });
   });
 });

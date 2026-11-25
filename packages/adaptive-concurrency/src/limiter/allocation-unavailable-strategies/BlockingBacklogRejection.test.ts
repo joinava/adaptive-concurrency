@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AllotmentReservation } from "../../AllotmentReservation.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import type { AcquireResult, LimitAllotment } from "../../Limiter.js";
@@ -11,6 +12,11 @@ import {
   MAX_TIMEOUT,
   type BlockingBacklogRejectionOptions,
 } from "./BlockingBacklogRejection.js";
+
+/** Whether `error` is the reason of a signal that `abort()` aborted with no reason. */
+function isAbortReason(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
 
 type BlockingOptions<ContextT> = Partial<
   Pick<
@@ -78,7 +84,7 @@ describe("Blocking backlog rejection strategies", () => {
       await listener2!.releaseAndRecordSuccess();
     });
 
-    it("should return undefined on backlog timeout", async () => {
+    it("should reject with an unavailable allotment on backlog timeout", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
         allotmentUnavailableStrategy: makeFifoBlockingRejection({
@@ -90,10 +96,9 @@ describe("Blocking backlog rejection strategies", () => {
       assert.ok(listener1);
 
       const start = performance.now();
-      const listener2 = await limiter.acquire({});
+      await assert.rejects(limiter.acquire({}), isAllotmentUnavailableError);
       const elapsed = performance.now() - start;
 
-      assert.equal(listener2, undefined, "Should return undefined on timeout");
       assert.ok(
         elapsed >= 50,
         `Should have waited at least 50ms, but waited ${elapsed}ms`,
@@ -160,13 +165,17 @@ describe("Blocking backlog rejection strategies", () => {
         results.push(limiter.acquire({}));
       }
 
+      // Each release hands the slot to the next waiter, so every waiter
+      // acquires and none is left to time out after the test.
       await listener1!.releaseAndRecordSuccess();
-
-      const second = await results[0];
-      assert.ok(second, "Second should eventually acquire");
+      for (const result of results) {
+        const next = await result;
+        assert.ok(next, "Each waiter should eventually acquire");
+        await next.releaseAndRecordSuccess();
+      }
     });
 
-    it("should return undefined when aborted while waiting", async () => {
+    it("should reject with the signal's reason when aborted while waiting", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
         allotmentUnavailableStrategy: makeFifoBlockingRejection({
@@ -183,8 +192,7 @@ describe("Blocking backlog rejection strategies", () => {
       });
       setTimeout(() => abortController.abort(), 20);
 
-      const listener2 = await acquirePromise;
-      assert.equal(listener2, undefined, "Should return undefined after abort");
+      await assert.rejects(acquirePromise, isAbortReason);
 
       await listener1!.releaseAndRecordSuccess();
     });
@@ -201,15 +209,18 @@ describe("Blocking backlog rejection strategies", () => {
       assert.ok(listener1);
 
       const start = performance.now();
-      const listener2 = await limiter.acquire({ context: { timeoutMs: 50 } });
+      await assert.rejects(
+        limiter.acquire({ context: { timeoutMs: 50 } }),
+        isAllotmentUnavailableError,
+        "Should time out based on context",
+      );
       const elapsed = performance.now() - start;
 
-      assert.equal(listener2, undefined, "Should time out based on context");
       assert.ok(elapsed >= 20);
       await listener1!.releaseAndRecordSuccess();
     });
 
-    it("should return undefined when backlog is full", async () => {
+    it("should reject with an unavailable allotment when backlog is full", async () => {
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
         allotmentUnavailableStrategy: makeFifoBlockingRejection({
@@ -222,9 +233,11 @@ describe("Blocking backlog rejection strategies", () => {
       assert.ok(first);
 
       const secondPromise = limiter.acquire({});
-      const third = await limiter.acquire({});
-
-      assert.equal(third, undefined, "Should reject when backlog is full");
+      await assert.rejects(
+        limiter.acquire({}),
+        isAllotmentUnavailableError,
+        "Should reject when backlog is full",
+      );
       await first!.releaseAndRecordSuccess();
       const second = await secondPromise;
       assert.ok(second);
@@ -239,16 +252,17 @@ describe("Blocking backlog rejection strategies", () => {
       abortController.abort();
 
       let retryCalls = 0;
-      const result = await strategy.onAllotmentUnavailable(
-        undefined,
-        async () => {
-          retryCalls += 1;
-          return undefined;
-        },
-        abortController.signal,
+      await assert.rejects(
+        strategy.onAllotmentUnavailable(
+          undefined,
+          async () => {
+            retryCalls += 1;
+            return undefined;
+          },
+          abortController.signal,
+        ),
+        isAbortReason,
       );
-
-      assert.equal(result, undefined);
       assert.equal(
         retryCalls,
         0,
@@ -271,7 +285,7 @@ describe("Blocking backlog rejection strategies", () => {
       const abortController = new AbortController();
       const abortedWaiter = limiter.acquire({ signal: abortController.signal });
       setTimeout(() => abortController.abort(), 20);
-      assert.equal(await abortedWaiter, undefined);
+      await assert.rejects(abortedWaiter, isAbortReason);
 
       // If aborted waiters are cleaned up correctly, this should be admitted to backlog.
       const nextWaiterPromise = limiter.acquire({});
@@ -323,9 +337,10 @@ describe("Blocking backlog rejection strategies", () => {
         return freshAllotment;
       };
 
-      const stalePromise = strategy.onAllotmentUnavailable(
-        { id: "stale", timeoutMs: 20 },
-        retry,
+      const staleRejected = assert.rejects(
+        strategy.onAllotmentUnavailable({ id: "stale", timeoutMs: 20 }, retry),
+        isAllotmentUnavailableError,
+        "stale waiter should time out",
       );
       const freshPromise = strategy.onAllotmentUnavailable(
         { id: "fresh", timeoutMs: 200 },
@@ -337,11 +352,7 @@ describe("Blocking backlog rejection strategies", () => {
       firstRetryResolve!(staleAllotment);
       await releaseWhileStaleInFlight;
 
-      assert.equal(
-        await stalePromise,
-        undefined,
-        "stale waiter should time out",
-      );
+      await staleRejected;
       assert.equal(
         ignoredAllotments,
         1,
@@ -423,7 +434,10 @@ describe("Blocking backlog rejection strategies", () => {
       const holder = await limiter.acquire({});
       assert.ok(holder);
 
-      const abortedPromise = limiter.acquire({ signal: ac.signal });
+      const abortedPromise = assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        isAbortReason,
+      );
       const waitingPromise = limiter.acquire({});
 
       // Release the holder, triggering drain. The drain will call retry for
@@ -438,11 +452,7 @@ describe("Blocking backlog rejection strategies", () => {
       acquireGateResolve!();
 
       await releasePromise;
-      assert.equal(
-        await abortedPromise,
-        undefined,
-        "aborted waiter resolves undefined",
-      );
+      await abortedPromise;
 
       const second = await Promise.race([
         waitingPromise,
@@ -469,14 +479,20 @@ describe("Blocking backlog rejection strategies", () => {
 
       const ac1 = new AbortController();
       const ac2 = new AbortController();
-      const aborted1 = limiter.acquire({ signal: ac1.signal });
-      const aborted2 = limiter.acquire({ signal: ac2.signal });
+      const aborted1 = assert.rejects(
+        limiter.acquire({ signal: ac1.signal }),
+        isAbortReason,
+      );
+      const aborted2 = assert.rejects(
+        limiter.acquire({ signal: ac2.signal }),
+        isAbortReason,
+      );
       const waitingPromise = limiter.acquire({});
 
       ac1.abort();
       ac2.abort();
-      assert.equal(await aborted1, undefined);
-      assert.equal(await aborted2, undefined);
+      await aborted1;
+      await aborted2;
 
       await holder!.releaseAndRecordSuccess();
 
@@ -501,14 +517,17 @@ describe("Blocking backlog rejection strategies", () => {
       assert.ok(holder);
 
       const ac = new AbortController();
-      const abortedPromise = limiter.acquire({ signal: ac.signal });
+      const abortedPromise = assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        isAbortReason,
+      );
       const waitingPromise = limiter.acquire({});
 
       // Abort and release in same microtask batch
       ac.abort();
       const releasePromise = holder!.releaseAndRecordSuccess();
 
-      assert.equal(await abortedPromise, undefined);
+      await abortedPromise;
       await releasePromise;
 
       const result = await Promise.race([
@@ -537,11 +556,11 @@ describe("Blocking backlog rejection strategies", () => {
         () => new AbortController(),
       );
       const promises = controllers.map((ac) =>
-        limiter.acquire({ signal: ac.signal }),
+        assert.rejects(limiter.acquire({ signal: ac.signal }), isAbortReason),
       );
 
       for (const ac of controllers) ac.abort();
-      for (const p of promises) assert.equal(await p, undefined);
+      for (const p of promises) await p;
 
       await holder!.releaseAndRecordSuccess();
       assert.equal(limiter.getInflight(), 0, "inflight must return to 0");
@@ -567,18 +586,17 @@ describe("Blocking backlog rejection strategies", () => {
       assert.ok(holder);
 
       // First waiter has a very short timeout
-      const shortTimeout = limiter.acquire({ context: 30 as unknown as void });
+      const shortTimeout = assert.rejects(
+        limiter.acquire({ context: 30 as unknown as void }),
+        isAllotmentUnavailableError,
+      );
       const longTimeout = limiter.acquire({
         context: 5_000 as unknown as void,
       });
 
       // Wait for short timeout to expire
       await new Promise((r) => setTimeout(r, 60));
-      assert.equal(
-        await shortTimeout,
-        undefined,
-        "short-timeout waiter should expire",
-      );
+      await shortTimeout; // short-timeout waiter should expire
 
       await holder!.releaseAndRecordSuccess();
 
@@ -604,12 +622,15 @@ describe("Blocking backlog rejection strategies", () => {
       assert.ok(holders[1]);
 
       const ac = new AbortController();
-      const abortedPromise = limiter.acquire({ signal: ac.signal });
+      const abortedPromise = assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        isAbortReason,
+      );
       const w1 = limiter.acquire({});
       const w2 = limiter.acquire({});
 
       ac.abort();
-      assert.equal(await abortedPromise, undefined);
+      await abortedPromise;
 
       await holders[0]!.releaseAndRecordSuccess();
       const r1 = await Promise.race([
@@ -639,11 +660,10 @@ describe("Blocking backlog rejection strategies", () => {
       const ac = new AbortController();
       ac.abort();
 
-      const result = await limiter.acquire({ signal: ac.signal });
-      assert.equal(
-        result,
-        undefined,
-        "pre-aborted signal should return undefined immediately",
+      await assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        isAbortReason,
+        "pre-aborted signal should reject immediately",
       );
       assert.equal(limiter.getInflight(), 0, "inflight should remain 0");
     });
@@ -670,10 +690,13 @@ describe("Blocking backlog rejection strategies", () => {
 
       const ac = new AbortController();
 
-      const abortablePromise = strategy.onAllotmentUnavailable(
-        { id: "aborting", timeoutMs: 5_000 },
-        async () => retryGate,
-        ac.signal,
+      const abortablePromise = assert.rejects(
+        strategy.onAllotmentUnavailable(
+          { id: "aborting", timeoutMs: 5_000 },
+          async () => retryGate,
+          ac.signal,
+        ),
+        isAbortReason,
       );
       const stablePromise = strategy.onAllotmentUnavailable(
         { id: "stable", timeoutMs: 5_000 },
@@ -690,8 +713,8 @@ describe("Blocking backlog rejection strategies", () => {
       retryResolve!(allotment);
       await drainPromise;
 
-      // The aborted waiter should resolve undefined (it was removed by abort)
-      assert.equal(await abortablePromise, undefined);
+      // The aborted waiter rejects with the signal's reason (it was removed by abort)
+      await abortablePromise;
 
       // The allotment should have been released (removeByHandle returns false for
       // the aborted waiter), and the drain should continue to serve the stable waiter
@@ -705,7 +728,7 @@ describe("Blocking backlog rejection strategies", () => {
   });
 
   describe("LifoBlockingRejection", () => {
-    it("returns undefined immediately when signal is already aborted", async () => {
+    it("rejects with the signal's reason immediately when signal is already aborted", async () => {
       const strategy = makeLifoBlockingRejection<void>({
         backlogTimeout: 5_000,
       });
@@ -713,16 +736,17 @@ describe("Blocking backlog rejection strategies", () => {
       abortController.abort();
 
       let retryCalls = 0;
-      const result = await strategy.onAllotmentUnavailable(
-        undefined,
-        async () => {
-          retryCalls += 1;
-          return undefined;
-        },
-        abortController.signal,
+      await assert.rejects(
+        strategy.onAllotmentUnavailable(
+          undefined,
+          async () => {
+            retryCalls += 1;
+            return undefined;
+          },
+          abortController.signal,
+        ),
+        isAbortReason,
       );
-
-      assert.equal(result, undefined);
       assert.equal(retryCalls, 0);
     });
 
@@ -772,9 +796,10 @@ describe("Blocking backlog rejection strategies", () => {
         { id: "fresh", timeoutMs: 200 },
         retry,
       );
-      const stalePromise = strategy.onAllotmentUnavailable(
-        { id: "stale", timeoutMs: 20 },
-        retry,
+      const staleRejected = assert.rejects(
+        strategy.onAllotmentUnavailable({ id: "stale", timeoutMs: 20 }, retry),
+        isAllotmentUnavailableError,
+        "stale waiter should time out",
       );
 
       const releaseWhileStaleInFlight = strategy.onAllotmentReleased();
@@ -782,11 +807,7 @@ describe("Blocking backlog rejection strategies", () => {
       firstRetryResolve!(staleAllotment);
       await releaseWhileStaleInFlight;
 
-      assert.equal(
-        await stalePromise,
-        undefined,
-        "stale waiter should time out",
-      );
+      await staleRejected;
       assert.equal(
         ignoredAllotments,
         1,
@@ -872,7 +893,10 @@ describe("Blocking backlog rejection strategies", () => {
 
       // In LIFO, w1 goes to front, then abortedPromise displaces it to front
       const w1 = limiter.acquire({});
-      const abortedPromise = limiter.acquire({ signal: ac.signal });
+      const abortedPromise = assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        isAbortReason,
+      );
 
       // Release triggers drain. The drain retries the LIFO head (the abortable
       // waiter), which blocks on acquireGateResolve.
@@ -883,11 +907,7 @@ describe("Blocking backlog rejection strategies", () => {
       acquireGateResolve!();
 
       await releasePromise;
-      assert.equal(
-        await abortedPromise,
-        undefined,
-        "aborted waiter resolves undefined",
-      );
+      await abortedPromise;
 
       const result = await Promise.race([
         w1,
@@ -915,13 +935,19 @@ describe("Blocking backlog rejection strategies", () => {
       const stable = limiter.acquire({});
       const ac1 = new AbortController();
       const ac2 = new AbortController();
-      const aborted1 = limiter.acquire({ signal: ac1.signal });
-      const aborted2 = limiter.acquire({ signal: ac2.signal });
+      const aborted1 = assert.rejects(
+        limiter.acquire({ signal: ac1.signal }),
+        isAbortReason,
+      );
+      const aborted2 = assert.rejects(
+        limiter.acquire({ signal: ac2.signal }),
+        isAbortReason,
+      );
 
       ac1.abort();
       ac2.abort();
-      assert.equal(await aborted1, undefined);
-      assert.equal(await aborted2, undefined);
+      await aborted1;
+      await aborted2;
 
       await holder!.releaseAndRecordSuccess();
 
@@ -950,11 +976,11 @@ describe("Blocking backlog rejection strategies", () => {
         () => new AbortController(),
       );
       const promises = controllers.map((ac) =>
-        limiter.acquire({ signal: ac.signal }),
+        assert.rejects(limiter.acquire({ signal: ac.signal }), isAbortReason),
       );
 
       for (const ac of controllers) ac.abort();
-      for (const p of promises) assert.equal(await p, undefined);
+      for (const p of promises) await p;
 
       await holder!.releaseAndRecordSuccess();
       assert.equal(limiter.getInflight(), 0);
@@ -978,12 +1004,15 @@ describe("Blocking backlog rejection strategies", () => {
 
       const w1 = limiter.acquire({});
       const ac = new AbortController();
-      const abortedPromise = limiter.acquire({ signal: ac.signal });
+      const abortedPromise = assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        isAbortReason,
+      );
 
       ac.abort();
       const releasePromise = holder!.releaseAndRecordSuccess();
 
-      assert.equal(await abortedPromise, undefined);
+      await abortedPromise;
       await releasePromise;
 
       const result = await Promise.race([
@@ -1010,14 +1039,13 @@ describe("Blocking backlog rejection strategies", () => {
       const longTimeout = limiter.acquire({
         context: 5_000 as unknown as void,
       });
-      const shortTimeout = limiter.acquire({ context: 30 as unknown as void });
+      const shortTimeout = assert.rejects(
+        limiter.acquire({ context: 30 as unknown as void }),
+        isAllotmentUnavailableError,
+      );
 
       await new Promise((r) => setTimeout(r, 60));
-      assert.equal(
-        await shortTimeout,
-        undefined,
-        "short-timeout head should expire",
-      );
+      await shortTimeout; // short-timeout head should expire
 
       await holder!.releaseAndRecordSuccess();
 
@@ -1059,10 +1087,13 @@ describe("Blocking backlog rejection strategies", () => {
 
       const ac = new AbortController();
       // LIFO: this goes to the front
-      const abortablePromise = strategy.onAllotmentUnavailable(
-        { id: "aborting", timeoutMs: 5_000 },
-        async () => retryGate,
-        ac.signal,
+      const abortablePromise = assert.rejects(
+        strategy.onAllotmentUnavailable(
+          { id: "aborting", timeoutMs: 5_000 },
+          async () => retryGate,
+          ac.signal,
+        ),
+        isAbortReason,
       );
 
       const drainPromise = strategy.onAllotmentReleased();
@@ -1070,11 +1101,7 @@ describe("Blocking backlog rejection strategies", () => {
       retryResolve!(allotment);
       await drainPromise;
 
-      assert.equal(
-        await abortablePromise,
-        undefined,
-        "aborted waiter resolves undefined",
-      );
+      await abortablePromise;
 
       await strategy.onAllotmentReleased();
       assert.equal(

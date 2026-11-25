@@ -50,7 +50,6 @@ For the common case—"run some work subject to/using the limit and record the r
 import {
   Limiter,
   VegasLimit,
-  QuotaNotAvailable,
   makeLimitedFunction,
   success,
   ignore,
@@ -91,12 +90,13 @@ try {
   // Options argument is optional here; is passed as options to acquire().
   const result = await callWithLimiter({ context: "tenant-a" });
 
-  if (result === QuotaNotAvailable) {
-    // Callback was not run because calls to the downstream were already
-    // at the max concurrency (and the limiter wasn't set up to queue further
-    // acquire calls)
+  if (!result.ok) {
+    // Callback was not run because the limiter gave no allotment: calls to
+    // the downstream were already at the max concurrency, and the limiter
+    // either wasn't set up to queue further acquire calls or gave up waiting.
+    // `result.error` is the `allotmentUnavailableError`.
   } else {
-    // `result` is the value inside `success` / `ignore`
+    // `result.value` is the value inside `success` / `ignore`
   }
 } catch (e) {
   // handle the error the callback threw, if any.
@@ -109,8 +109,8 @@ try {
 
 | Callback behavior | Limiter bookkeeping | `callWithLimiter` outcome |
 | ----------------- | ------------------- | ------------------------- |
-| `return success(v)` or `return v` | `releaseAndRecordSuccess()` | resolves with `v` |
-| `return ignore(v)` | `releaseAndIgnore()` | resolves with `v` |
+| `return success(v)` or `return v` | `releaseAndRecordSuccess()` | resolves with `{ ok: true, value: v }` |
+| `return ignore(v)` | `releaseAndIgnore()` | resolves with `{ ok: true, value: v }` |
 | `throw dropped(err)` | `releaseAndRecordDropped()` | rejects with `err` |
 | `throw AdaptiveTimeoutError` / `throw AdaptiveRejectionError` | `releaseAndRecordDropped()` | rejects with the same error |
 | `throw ignore(err)` or `throw err` | `releaseAndIgnore()` | rejects with `err` |
@@ -120,7 +120,7 @@ Notes:
 - Returning a non-`RunResult` value is shorthand for `return success(value)`.
 - Throwing a non-`RunResult` error is shorthand for `throw ignore(error)`.
 - Returning `dropped(error)` is invalid; use `throw dropped(error)` for drop semantics.
-- If `acquire` yields no allotment, `callWithLimiter` returns `QuotaNotAvailable` and does not call `fn` (compare with `=== QuotaNotAvailable`).
+- If `acquire` rejects with an `allotmentUnavailableError`, `callWithLimiter` resolves with `{ ok: false, error }` and does not call `fn`. Any other rejection of `acquire`, such as the signal's reason after an abort, rejects `callWithLimiter`.
 
 For advanced usage patterns—including `withLimiter(limiter)` and direct `acquire` flows—see [Advanced usage patterns](./docs/ADVANCED_USAGE_PATTERNS.md).
 
@@ -199,12 +199,18 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 
 - **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**, optional **`operationNameFor`** to tag samples for group-aware limits, and optional **`stallDetection`** (see below).
 - **`AcquireStrategy`** — Two-phase admission contract. `tryReserveAllotment(context, state)` returns an `AllotmentReservation` when capacity is tentatively reserved; the limiter then calls `commit()` when admission succeeds or `cancel()` when an outer decision rejects/aborts before the allotment is returned. This lets composed strategies reserve locally without emitting metrics or waking waiters until the overall acquire succeeds.
+- **`Limiter.acquire()`** — Resolves with a `LimitAllotment`. It rejects with an `allotmentUnavailableError` when the limiter gives no allotment (test with `isAllotmentUnavailableError`), and with the signal's `reason` when the signal aborts first.
 - **`LimitAllotment`** — Handle returned from `Limiter.acquire()`. Call exactly one release method: `releaseAndRecordSuccess()`, `releaseAndIgnore()`, or `releaseAndRecordDropped()`. `releaseAndRecordSuccess` and `releaseAndRecordDropped` take an optional `weight`, which is passed to `AdaptiveLimit.addSample`.
 - **`AllotmentReservation`** — Helper class for implementing two-phase `AcquireStrategy` instances. Its `commit()` and `cancel()` methods are idempotent.
 - **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. It tracks speculative reservations separately from committed inflight work so cancelled reservations do not pollute partition metrics.
 - **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function. Enqueue-triggered drains are coalesced and only retry the queue head, avoiding lost wakeups without fanning out retries across the whole queue.
-- **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still return no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
+- **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still reject with an `allotmentUnavailableError` (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
 - **`DelayedThenBlockingRejection`** — Two-stage behavior: unconditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
+- **`AllotmentUnavailableStrategy`** — Contract for what happens when the acquire strategy refuses. To give up, a strategy rejects with an `allotmentUnavailableError`. It can state a `retryAfter`, or a different `load`, when it knows more. On abort, it rejects with the signal's `reason`.
+
+## Errors
+
+The package's errors are annotated with [`@zingage/errors`](https://www.npmjs.com/package/@zingage/errors), which is a peer dependency. `allotmentUnavailableError` is a type under the `SERVICE_UNAVAILABLE` root: safe to retry, it clears on its own, and it signals high load. An app that reads errors with `@zingage/errors` lists `adaptiveConcurrencyErrorVocabulary` in `makeErrorHelpers({ vocabularies })`.
 
 ## Event-loop stall detection
 

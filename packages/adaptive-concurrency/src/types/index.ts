@@ -6,4 +6,5 @@ export type {
   AllotmentUnavailableStrategy,
   LimitAllotment,
   LimiterState,
+  RetryAcquire,
 } from "./Strategy.js";

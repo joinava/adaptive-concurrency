@@ -9,10 +9,43 @@ The package is pre-1.0, so a minor version bump can contain breaking changes.
 
 Releases before 0.14.0 have no entries; see the git history.
 
-## [Unreleased]
+## [0.15.0] - Unreleased
+
+Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
+0.3.0.
+
+### Breaking
+
+- `Limiter.acquire()` no longer resolves with `undefined` when the limiter
+  gives no allotment. `AcquireResult` is now `Promise<LimitAllotment>`, and
+  the promise rejects:
+  - with an `allotmentUnavailableError` when no allotment is available, the
+    backlog is full, or the request times out in the backlog. Test for it
+    with `isAllotmentUnavailableError`.
+  - with the signal's `reason` when the caller's signal aborts, including a
+    signal that had aborted before the call.
+- `AllotmentUnavailableStrategy.onAllotmentUnavailable` must resolve with an
+  allotment, or reject. To give up, it rejects with an
+  `allotmentUnavailableError`; on abort, it rejects with the signal's
+  `reason`. Its `retry` callback is typed `RetryAcquire<ContextT>` and still
+  resolves with `undefined` while the acquire strategy refuses. A strategy
+  that resolves with `undefined` makes `acquire()` reject with a `TypeError`.
+- `withLimiter` and `makeLimitedFunction` resolve with a `LimitedCallResult`:
+  `{ ok: true, value }`, or `{ ok: false, error }` when the limiter gave no
+  allotment and `fn` did not run. Any other rejection of `acquire()`, such as
+  an abort, rejects. `QuotaNotAvailable` is removed.
+- `@zingage/errors` (^1.1.0) is a new peer dependency.
 
 ### Added
 
+- `allotmentUnavailableError`, `isAllotmentUnavailableError`, and
+  `adaptiveConcurrencyErrorVocabulary`. The error type
+  `ALLOTMENT_UNAVAILABLE` is under the `SERVICE_UNAVAILABLE` root: safe to
+  retry, clears on its own, and signals high load. A throw site can state a
+  `retryAfter`, or a different `load`. An app that reads errors with
+  `@zingage/errors` lists the vocabulary in `makeErrorHelpers({ vocabularies })`.
+- `DelayedRejectStrategy.delay(context, signal)`, the delay alone, which
+  `DelayedThenBlockingRejection` uses.
 - `LimitAllotment.releaseAndRecordSuccess` and `releaseAndRecordDropped` take
   an optional `weight`: the amount of work that the operation represented,
   for example the number of items in a batch call. `Limiter` passes it to the

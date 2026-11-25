@@ -10,7 +10,6 @@ For cases where you want to pass a callback at each call site (rather than pre-b
 import {
   Limiter,
   VegasLimit,
-  QuotaNotAvailable,
   withLimiter,
   success,
   ignore,
@@ -50,12 +49,11 @@ const result = await callWithLimiter(
   },
 );
 
-if (result === QuotaNotAvailable) {
-  // Callback was not run because calls to the downstream were already
-  // at the max concurrency (and the limiter wasn't set up to queue further
-  // acquire calls)
+if (!result.ok) {
+  // Callback was not run because the limiter gave no allotment.
+  // `result.error` is the `allotmentUnavailableError`.
 } else {
-  // `result` is the value inside `success` / `ignore`
+  // `result.value` is the value inside `success` / `ignore`
 }
 ```
 
@@ -65,8 +63,8 @@ if (result === QuotaNotAvailable) {
 
 | Callback behavior | Limiter bookkeeping | `callWithLimiter` outcome |
 | ----------------- | ------------------- | ------------------------- |
-| `return success(v)` or `return v` | `releaseAndRecordSuccess()` | resolves with `v` |
-| `return ignore(v)` | `releaseAndIgnore()` | resolves with `v` |
+| `return success(v)` or `return v` | `releaseAndRecordSuccess()` | resolves with `{ ok: true, value: v }` |
+| `return ignore(v)` | `releaseAndIgnore()` | resolves with `{ ok: true, value: v }` |
 | `throw dropped(err)` | `releaseAndRecordDropped()` | rejects with `err` |
 | `throw AdaptiveTimeoutError` / `throw AdaptiveRejectionError` | `releaseAndRecordDropped()` | rejects with the same error |
 | `throw ignore(err)` or `throw err` | `releaseAndIgnore()` | rejects with `err` |
@@ -76,28 +74,32 @@ Notes:
 - Returning a non-`RunResult` value is shorthand for `return success(value)`.
 - Throwing a non-`RunResult` error is shorthand for `throw ignore(error)`.
 - Returning `dropped(error)` is invalid; use `throw dropped(error)` for drop semantics.
-- If `acquire` yields no allotment, `callWithLimiter` returns `QuotaNotAvailable` and does not call `fn` (compare with `=== QuotaNotAvailable`).
+- If `acquire` rejects with an `allotmentUnavailableError`, `callWithLimiter` resolves with `{ ok: false, error }` and does not call `fn`. Any other rejection of `acquire`, such as the signal's reason after an abort, rejects `callWithLimiter`.
 
 ## Direct `acquire` + `LimitAllotment`
 
 `acquire` is a lower-level API that's not as safe, as you MUST be sure to call `releaseAndRecordSuccess()`, `releaseAndRecordDropped()` or `releaseAndIgnore()` when the operation is complete.
 
 ```typescript
-const allotment = await limiter.acquire({ context: "tenant-a" });
-if (allotment) {
-  try {
-    await doWork();
-    await allotment.releaseAndRecordSuccess();
-  } catch {
-    await allotment.releaseAndRecordDropped();
-  }
-} else {
+let allotment: LimitAllotment;
+try {
+  allotment = await limiter.acquire({ context: "tenant-a" });
+} catch (error) {
+  if (!isAllotmentUnavailableError(error)) throw error;
   // No allotment right now
+  return;
+}
+
+try {
+  await doWork();
+  await allotment.releaseAndRecordSuccess();
+} catch {
+  await allotment.releaseAndRecordDropped();
 }
 ```
 
 To use it, pass `AcquireOptions`: `{ context }` when the limiter is keyed by context, `{ signal }` for `AbortSignal`, or omit/`{}` for a void context.
 
-`acquire` returns `Promise<LimitAllotment | undefined>` and should be awaited directly.
+`acquire` returns `Promise<LimitAllotment>` and should be awaited directly. It rejects with an `allotmentUnavailableError` when the limiter gives no allotment, and with the signal's `reason` when the signal aborts first.
 
 Use `acquire` + `LimitAllotment` when you need a separate acquire and release (framework hooks, streaming lifetimes, handoff to another owner). Use `withLimiter(limiter)` or `makeLimitedFunction(limiter, fn)` when a single async scope is enough.

@@ -1,17 +1,17 @@
 import type { IsEqual } from "type-fest";
 import type { Satisfies } from "type-party";
 import type { Limiter } from "./Limiter.js";
+import { isAllotmentUnavailableError } from "./errors.js";
 import {
   isAdaptiveDropError,
   isRunResult,
-  QuotaNotAvailable,
   type AdaptiveRejectionError,
   type AdaptiveTimeoutError,
   type RunIgnore,
   type RunResult,
   type RunSuccess,
 } from "./RunResult.js";
-import type { AcquireOptions } from "./types/Strategy.js";
+import type { AcquireOptions, LimitAllotment } from "./types/Strategy.js";
 
 export type RunCallbackArgs<ContextT> = {
   context: ContextT | undefined;
@@ -28,20 +28,35 @@ type FunctionToLimit<ContextT, T> = (
   args: RunCallbackArgs<ContextT>,
 ) => T | ReturnableRunResult<T> | Promise<T | ReturnableRunResult<T>>;
 
+/**
+ * What a {@link CallWithLimiter} resolves with. `ok: false` means that the
+ * limiter gave no allotment, so `fn` never ran. `error` is the
+ * `allotmentUnavailableError` that `Limiter.acquire` rejected with. It is a
+ * result, not a rejection, because an unavailable allotment is an expected
+ * outcome under load, and the caller must decide what to do with it.
+ */
+export type LimitedCallResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: Error };
+
 export type CallWithLimiter<ContextT> = {
-  <T>(fn: FunctionToLimit<ContextT, T>): Promise<T | typeof QuotaNotAvailable>;
+  <T>(fn: FunctionToLimit<ContextT, T>): Promise<LimitedCallResult<T>>;
 
   <T>(
     options: AcquireOptions<ContextT>,
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable>;
+  ): Promise<LimitedCallResult<T>>;
 };
 
 /**
  * Creates a helper that runs callbacks under acquired limiter allotments.
  *
- * - If {@link Limiter.acquire} yields no allotment, returns
- *   {@link QuotaNotAvailable} without invoking `fn`.
+ * - If {@link Limiter.acquire} rejects with an `allotmentUnavailableError`,
+ *   resolves with `{ ok: false, error }` without invoking `fn`. Any other
+ *   rejection of `acquire`, such as the signal's reason after an abort,
+ *   rejects the returned promise.
+ * - Otherwise resolves with `{ ok: true, value }`, where `value` is the
+ *   value described below.
  * - If callback returns a {@link RunResult} `success` / `ignore`, returns the
  *   carried value after recording success/ignore to the allotment. If the
  *   callback returns a non-{@link RunResult} value, it is treated as implicit
@@ -58,15 +73,15 @@ export function withLimiter<ContextT>(
 ): CallWithLimiter<ContextT> {
   async function callWithLimiter<T>(
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable>;
+  ): Promise<LimitedCallResult<T>>;
   async function callWithLimiter<T>(
     options: AcquireOptions<ContextT>,
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable>;
+  ): Promise<LimitedCallResult<T>>;
   async function callWithLimiter<T>(
     optionsOrFn: AcquireOptions<ContextT> | FunctionToLimit<ContextT, T>,
     maybeFn?: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable> {
+  ): Promise<LimitedCallResult<T>> {
     const [options, fn] =
       typeof optionsOrFn === "function"
         ? [undefined, optionsOrFn]
@@ -76,9 +91,14 @@ export function withLimiter<ContextT>(
       throw new Error("No function provided");
     }
 
-    const allotment = await limiter.acquire(options);
-    if (!allotment) {
-      return QuotaNotAvailable;
+    let allotment: LimitAllotment;
+    try {
+      allotment = await limiter.acquire(options);
+    } catch (error) {
+      if (isAllotmentUnavailableError(error)) {
+        return { ok: false, error: error as Error };
+      }
+      throw error;
     }
 
     try {
@@ -148,13 +168,13 @@ export function withLimiter<ContextT>(
             IsEqual<typeof allotmentOutcome.kind, "return">,
             true
           >;
-          return allotmentOutcome.value;
+          return { ok: true, value: allotmentOutcome.value };
         case "ignore":
           await allotment.releaseAndIgnore();
           if (allotmentOutcome.kind === "throw") {
             throw allotmentOutcome.value;
           } else {
-            return allotmentOutcome.value;
+            return { ok: true, value: allotmentOutcome.value };
           }
         case "drop":
           await allotment.releaseAndRecordDropped();
@@ -179,7 +199,7 @@ export function withLimiter<ContextT>(
 export function makeLimitedFunction<ContextT, T>(
   limiter: Limiter<ContextT>,
   fn: FunctionToLimit<ContextT, T>,
-): (opts?: AcquireOptions<ContextT>) => Promise<T | typeof QuotaNotAvailable> {
+): (opts?: AcquireOptions<ContextT>) => Promise<LimitedCallResult<T>> {
   const callWithLimiter = withLimiter(limiter);
   return (options?: AcquireOptions<ContextT>) =>
     options ? callWithLimiter(options, fn) : callWithLimiter(fn);

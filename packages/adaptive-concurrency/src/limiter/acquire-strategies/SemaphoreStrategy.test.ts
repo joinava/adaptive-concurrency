@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { isAllotmentUnavailableError } from "../../errors.js";
 import { Limiter } from "../../Limiter.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import { SemaphoreStrategy } from "./SemaphoreStrategy.js";
@@ -53,7 +54,10 @@ describe("SemaphoreStrategy", () => {
     for (let i = 0; i < 5; i++) {
       await limiter.acquire({ context: "test" });
     }
-    assert.equal(await limiter.acquire({ context: "test" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "test" }),
+      isAllotmentUnavailableError,
+    );
 
     limit.setLimit(10);
 

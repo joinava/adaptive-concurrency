@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makePartitionedLimiter } from "./makePartitionedLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 
 describe("makePartitionedLimiter", () => {
   it("allocates limits to partitions by percentage", async () => {
@@ -58,8 +59,14 @@ describe("makePartitionedLimiter", () => {
       assert.ok(await limiter.acquire({ context: "b" }));
     }
 
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
-    assert.equal(await limiter.acquire({ context: "b" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
+    await assert.rejects(
+      limiter.acquire({ context: "b" }),
+      isAllotmentUnavailableError,
+    );
   });
 
   it("releases capacity when allotment completes", async () => {
@@ -74,7 +81,10 @@ describe("makePartitionedLimiter", () => {
     const a = await limiter.acquire({ context: "a" });
     const b = await limiter.acquire({ context: "b" });
     assert.ok(a && b);
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
     await a!.releaseAndRecordSuccess();
     assert.ok(await limiter.acquire({ context: "a" }));
   });
@@ -111,9 +121,11 @@ describe("makePartitionedLimiter", () => {
     assert.ok(first);
 
     const start = performance.now();
-    const rejected = await limiter.acquire({ context: "a" });
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
     const elapsed = performance.now() - start;
-    assert.equal(rejected, undefined);
     assert.ok(elapsed >= 30);
   });
 
@@ -128,7 +140,10 @@ describe("makePartitionedLimiter", () => {
     });
 
     assert.ok(await limiter.acquire({ context: "a" }));
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
     assert.ok(await limiter.acquire({ context: "bypass" }));
   });
 
@@ -148,7 +163,7 @@ describe("makePartitionedLimiter", () => {
     const t0 = performance.now();
     await limiter.acquire({ context: "b" });
     assert.ok(performance.now() - t0 < 20);
-    await slow;
+    await assert.rejects(slow, isAllotmentUnavailableError);
   });
 
   it("respects AbortSignal during delay", async () => {
@@ -163,7 +178,7 @@ describe("makePartitionedLimiter", () => {
     const pending = limiter.acquire({ context: "a", signal: ac.signal });
     queueMicrotask(() => ac.abort());
     const t0 = performance.now();
-    await pending;
+    await assert.rejects(pending, { name: "AbortError" });
     assert.ok(performance.now() - t0 < 100);
   });
 

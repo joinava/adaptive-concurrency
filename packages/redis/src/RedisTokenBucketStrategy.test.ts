@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   AllotmentReservation,
+  isAllotmentUnavailableError,
   Limiter,
   PartitionedStrategy,
   SemaphoreStrategy,
@@ -749,9 +750,9 @@ describe("RedisTokenBucketStrategy", () => {
       assert.ok(a && b, "first two acquires use the local permits");
       assert.equal(client.evalShaCalls.length, 2);
 
-      assert.equal(
-        await limiter.acquire(),
-        undefined,
+      await assert.rejects(
+        limiter.acquire(),
+        isAllotmentUnavailableError,
         "third acquire rejected by the semaphore before Redis is consulted",
       );
       assert.equal(
@@ -782,9 +783,9 @@ describe("RedisTokenBucketStrategy", () => {
         }),
       });
 
-      assert.equal(
-        await limiter.acquire(),
-        undefined,
+      await assert.rejects(
+        limiter.acquire(),
+        isAllotmentUnavailableError,
         "bucket denies → semaphore reservation is cancelled, permit returned",
       );
       const allotment = await limiter.acquire();
@@ -845,8 +846,11 @@ describe("RedisTokenBucketStrategy", () => {
         }),
       });
 
-      const denied = await limiter.acquire({ context: "a" });
-      assert.equal(denied, undefined, "bucket denies the first acquire");
+      await assert.rejects(
+        limiter.acquire({ context: "a" }),
+        isAllotmentUnavailableError,
+        "bucket denies the first acquire",
+      );
       assert.deepEqual(
         inflightSamples,
         [],
@@ -900,8 +904,11 @@ describe("RedisTokenBucketStrategy", () => {
         "partition a's inflight is incremented",
       );
 
-      const deniedB = await limiter.acquire({ context: "b" });
-      assert.equal(deniedB, undefined, "partition b denied by the bucket");
+      await assert.rejects(
+        limiter.acquire({ context: "b" }),
+        isAllotmentUnavailableError,
+        "partition b denied by the bucket",
+      );
       assert.equal(
         partitioned.getPartition("b")?.inFlight,
         0,

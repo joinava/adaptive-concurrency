@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makePartitionedLifoBlockingLimiter } from "./makePartitionedLifoBlockingLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 
 describe("makePartitionedLifoBlockingLimiter", () => {
   it("acquires immediately when under limit", async () => {
@@ -44,7 +45,7 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     assert.deepEqual(order, ["new", "old"]);
   });
 
-  it("returns undefined when backlog timeout is reached", async () => {
+  it("rejects with an unavailable allotment when backlog timeout is reached", async () => {
     const limiter = makePartitionedLifoBlockingLimiter<string>({
       backlogTimeout: 50,
       limiter: { limit: new FixedLimit(1) },
@@ -54,13 +55,15 @@ describe("makePartitionedLifoBlockingLimiter", () => {
 
     assert.ok(await limiter.acquire({ context: "a" }));
     const start = performance.now();
-    const out = await limiter.acquire({ context: "a" });
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
     const elapsed = performance.now() - start;
-    assert.equal(out, undefined);
     assert.ok(elapsed >= 35);
   });
 
-  it("returns undefined when backlog size is exceeded", async () => {
+  it("rejects with an unavailable allotment when backlog size is exceeded", async () => {
     const limiter = makePartitionedLifoBlockingLimiter<string>({
       backlogSize: 1,
       backlogTimeout: 5_000,
@@ -73,14 +76,16 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     assert.ok(first);
 
     const inBacklog = limiter.acquire({ context: "a" });
-    const overflow = await limiter.acquire({ context: "a" });
-    assert.equal(overflow, undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
 
     await first!.releaseAndRecordSuccess();
     assert.ok(await inBacklog);
   });
 
-  it("returns undefined when aborted while waiting", async () => {
+  it("rejects with the abort reason when aborted while waiting", async () => {
     const limiter = makePartitionedLifoBlockingLimiter<string>({
       backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
@@ -92,7 +97,7 @@ describe("makePartitionedLifoBlockingLimiter", () => {
     const ac = new AbortController();
     const waiting = limiter.acquire({ context: "a", signal: ac.signal });
     setTimeout(() => ac.abort(), 20);
-    assert.equal(await waiting, undefined);
+    await assert.rejects(waiting, { name: "AbortError" });
   });
 
   it("applies partition delay before entering blocking queue", async () => {

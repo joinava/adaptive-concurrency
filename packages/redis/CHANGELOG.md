@@ -9,6 +9,15 @@ The package is pre-1.0, so a minor version bump can contain breaking changes.
 
 Releases before 0.3.0 have no entries; see the git history.
 
+## [0.4.0] - Unreleased
+
+### Breaking
+
+- Pairs with core `adaptive-concurrency` 0.15.0. Under that version, a bucket
+  denial makes `Limiter.acquire()` reject with an
+  `allotmentUnavailableError`, where it used to resolve with `undefined`.
+  This package's own API does not change.
+
 ## [0.3.0] - 2026-09-16
 
 ### Breaking

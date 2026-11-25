@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import { makeSimpleLimiter } from "./makeSimpleLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 
 describe("makeSimpleLimiter", () => {
   it("uses limiter capacity until total limit is reached", async () => {
@@ -12,11 +13,13 @@ describe("makeSimpleLimiter", () => {
 
     const a = await limiter.acquire({ context: "a" });
     const b = await limiter.acquire({ context: "b" });
-    const c = await limiter.acquire({ context: "c" });
 
     assert.ok(a);
     assert.ok(b);
-    assert.equal(c, undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "c" }),
+      isAllotmentUnavailableError,
+    );
   });
 
   it("releases limit when allotment completes", async () => {
@@ -26,7 +29,10 @@ describe("makeSimpleLimiter", () => {
 
     const first = await limiter.acquire({ context: "a" });
     assert.ok(first);
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+    );
 
     await first.releaseAndRecordSuccess();
     assert.ok(await limiter.acquire({ context: "a" }));
@@ -39,14 +45,17 @@ describe("makeSimpleLimiter", () => {
     });
 
     assert.ok(await limiter.acquire({ context: "normal" }));
-    assert.equal(await limiter.acquire({ context: "normal" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "normal" }),
+      isAllotmentUnavailableError,
+    );
     assert.ok(await limiter.acquire({ context: "vip" }));
   });
 
   it("tracks inflight count", async () => {
     const limiter = makeSimpleLimiter<string>({ limit: new FixedLimit(2) });
     assert.equal(limiter.getInflight(), 0);
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await limiter.acquire({ context: "x" });
     assert.equal(limiter.getInflight(), 1);
     await allotment.releaseAndRecordSuccess();
     assert.equal(limiter.getInflight(), 0);
@@ -57,7 +66,10 @@ describe("makeSimpleLimiter", () => {
     const limiter = makeSimpleLimiter<string>({ limit });
 
     assert.ok(await limiter.acquire({ context: "x" }));
-    assert.equal(await limiter.acquire({ context: "x" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "x" }),
+      isAllotmentUnavailableError,
+    );
 
     limit.setLimit(2);
     assert.ok(await limiter.acquire({ context: "x" }));
@@ -65,13 +77,13 @@ describe("makeSimpleLimiter", () => {
 
   it("releases on ignore and dropped", async () => {
     const limiter = makeSimpleLimiter<string>({ limit: new FixedLimit(1) });
-    const a = (await limiter.acquire({ context: "x" }))!;
+    const a = await limiter.acquire({ context: "x" });
     await a.releaseAndIgnore();
     const afterIgnore = await limiter.acquire({ context: "x" });
     assert.ok(afterIgnore);
     await afterIgnore.releaseAndRecordSuccess();
 
-    const b = (await limiter.acquire({ context: "x" }))!;
+    const b = await limiter.acquire({ context: "x" });
     await b.releaseAndRecordDropped();
     assert.ok(await limiter.acquire({ context: "x" }));
   });

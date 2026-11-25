@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { isAllotmentUnavailableError } from "./errors.js";
 import { FixedLimit } from "./limit/FixedLimit.js";
 import { Limiter } from "./Limiter.js";
 import {
   AdaptiveRejectionError,
   AdaptiveTimeoutError,
-  QuotaNotAvailable,
   dropped,
   ignore,
   success,
@@ -18,10 +18,10 @@ describe("withLimiter", () => {
     const limited = withLimiter(limiter);
 
     const v = await limited({ context: "a" }, async () => success(42));
-    assert.equal(v, 42);
+    assert.deepEqual(v, { ok: true, value: 42 });
 
     const again = await limited({ context: "a" }, () => success("ok"));
-    assert.equal(again, "ok");
+    assert.deepEqual(again, { ok: true, value: "ok" });
   });
 
   it("treats plain callback returns as implicit success", async () => {
@@ -29,7 +29,7 @@ describe("withLimiter", () => {
     const limited = withLimiter(limiter);
 
     const v = await limited({ context: "a" }, () => 42);
-    assert.equal(v, 42);
+    assert.deepEqual(v, { ok: true, value: 42 });
 
     // Verify slot was released as success.
     const again = await limiter.acquire({ context: "a" });
@@ -41,14 +41,14 @@ describe("withLimiter", () => {
     const malformed = { kind: "success" } as const;
     const limited = withLimiter(limiter);
     const v = await limited({ context: "a" }, () => malformed);
-    assert.equal(v, malformed);
+    assert.deepEqual(v, { ok: true, value: malformed });
 
     // Verify slot was released as success.
     const again = await limiter.acquire({ context: "a" });
     assert.ok(again);
   });
 
-  it("returns QuotaNotAvailable when no allotment and does not run fn", async () => {
+  it("resolves { ok: false } when no allotment and does not run fn", async () => {
     const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
     const limited = withLimiter(limiter);
     await limiter.acquire({ context: "a" });
@@ -59,7 +59,25 @@ describe("withLimiter", () => {
       return success(null);
     });
 
-    assert.equal(out, QuotaNotAvailable);
+    assert.equal(out.ok, false);
+    assert.ok(!out.ok && isAllotmentUnavailableError(out.error));
+    assert.equal(ran, false);
+  });
+
+  it("rejects with the abort reason, and does not run fn, when the signal aborted", async () => {
+    const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
+    const limited = withLimiter(limiter);
+    const controller = new AbortController();
+    controller.abort();
+
+    let ran = false;
+    await assert.rejects(
+      limited({ context: "a", signal: controller.signal }, () => {
+        ran = true;
+        return success(null);
+      }),
+      (e: unknown) => e === controller.signal.reason,
+    );
     assert.equal(ran, false);
   });
 
@@ -68,7 +86,7 @@ describe("withLimiter", () => {
     const limited = withLimiter(limiter);
 
     const v = await limited({ context: "a" }, () => ignore(7));
-    assert.equal(v, 7);
+    assert.deepEqual(v, { ok: true, value: 7 });
 
     const next = await limiter.acquire({ context: "a" });
     assert.ok(next);
@@ -229,10 +247,10 @@ describe("withLimiter", () => {
 
     await limiter.acquire({ context: "norm" });
     const q = await limited({ context: "norm" }, () => success(1));
-    assert.equal(q, QuotaNotAvailable);
+    assert.equal(q.ok, false);
 
     const v = await limited({ context: "vip" }, () => success(2));
-    assert.equal(v, 2);
+    assert.deepEqual(v, { ok: true, value: 2 });
   });
 
   it("passes { context, signal } into callback", async () => {
@@ -249,7 +267,7 @@ describe("withLimiter", () => {
       },
     );
 
-    assert.equal(out, "ok");
+    assert.deepEqual(out, { ok: true, value: "ok" });
   });
 });
 
@@ -262,7 +280,7 @@ describe("makeLimitedFunction", () => {
     });
 
     const out = await limited({ context: "tenant-a" });
-    assert.equal(out, "ok");
+    assert.deepEqual(out, { ok: true, value: "ok" });
   });
 
   it("supports calling with no options", async () => {
@@ -270,10 +288,10 @@ describe("makeLimitedFunction", () => {
     const limited = makeLimitedFunction(limiter, () => success(42));
 
     const out = await limited();
-    assert.equal(out, 42);
+    assert.deepEqual(out, { ok: true, value: 42 });
   });
 
-  it("returns QuotaNotAvailable and does not run callback when acquire fails", async () => {
+  it("resolves { ok: false } and does not run callback when no allotment is available", async () => {
     const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
     await limiter.acquire({ context: "a" });
 
@@ -284,7 +302,8 @@ describe("makeLimitedFunction", () => {
     });
 
     const out = await limited({ context: "a" });
-    assert.equal(out, QuotaNotAvailable);
+    assert.equal(out.ok, false);
+    assert.ok(!out.ok && isAllotmentUnavailableError(out.error));
     assert.equal(ran, false);
   });
 
@@ -297,7 +316,7 @@ describe("makeLimitedFunction", () => {
     });
 
     const out = await limited({ context: "tenant-a", signal });
-    assert.equal(out, "ok");
+    assert.deepEqual(out, { ok: true, value: "ok" });
   });
 
   it("records drop and rethrows inner error on thrown dropped result", async () => {

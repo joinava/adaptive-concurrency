@@ -14,6 +14,8 @@ import {
   type Gauge,
   type MetricRegistry,
 } from "../../MetricRegistry.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
+import type { AcquireOptions, LimitAllotment } from "../../types/Strategy.js";
 
 function makeRecordingRegistry(): {
   registry: MetricRegistry;
@@ -61,6 +63,22 @@ function makePartitionedLimiter<
   });
 }
 
+/**
+ * Acquires an allotment, or returns `undefined` when the limiter gives none.
+ * For tests that count how many acquires a limiter admits.
+ */
+async function acquireOrUndefined<ContextT>(
+  limiter: Limiter<ContextT>,
+  options: AcquireOptions<ContextT>,
+): Promise<LimitAllotment | undefined> {
+  try {
+    return await limiter.acquire(options);
+  } catch (error) {
+    if (isAllotmentUnavailableError(error)) return undefined;
+    throw error;
+  }
+}
+
 describe("PartitionedStrategy", () => {
   it("should allocate limits to partitions based on percentage", async () => {
     const limiter = makePartitionedLimiter<string>({
@@ -74,7 +92,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -93,7 +111,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -115,7 +133,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -135,7 +153,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -169,11 +187,17 @@ describe("PartitionedStrategy", () => {
       listeners.push(l!);
     }
 
-    const extraA = await limiter.acquire({ context: "a" });
-    assert.equal(extraA, undefined, "Should reject a when its partition limit is reached");
+    await assert.rejects(
+      limiter.acquire({ context: "a" }),
+      isAllotmentUnavailableError,
+      "Should reject a when its partition limit is reached",
+    );
 
-    const extraB = await limiter.acquire({ context: "b" });
-    assert.equal(extraB, undefined, "Should reject b when its partition limit is reached");
+    await assert.rejects(
+      limiter.acquire({ context: "b" }),
+      isAllotmentUnavailableError,
+      "Should reject b when its partition limit is reached",
+    );
   });
 
   it("should release capacity when allotment completes", async () => {
@@ -186,11 +210,11 @@ describe("PartitionedStrategy", () => {
       },
     });
 
-    const l1 = (await limiter.acquire({ context: "a" }))!;
-    const l2 = (await limiter.acquire({ context: "b" }))!;
+    const l1 = await limiter.acquire({ context: "a" });
+    const l2 = await limiter.acquire({ context: "b" });
     assert.ok(l1 && l2);
 
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assert.rejects(limiter.acquire({ context: "a" }), isAllotmentUnavailableError);
 
     await l1.releaseAndRecordSuccess();
 
@@ -211,7 +235,9 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: i % 2 === 0 ? "a" : "b" });
+      const l = await acquireOrUndefined(limiter, {
+        context: i % 2 === 0 ? "a" : "b",
+      });
       if (l) listeners.push(l);
     }
     assert.equal(listeners.length, 10);
@@ -232,10 +258,10 @@ describe("PartitionedStrategy", () => {
       bypassResolver: (ctx) => ctx === "bypass",
     });
 
-    const l1 = (await limiter.acquire({ context: "a" }))!;
+    const l1 = await limiter.acquire({ context: "a" });
     assert.ok(l1);
 
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assert.rejects(limiter.acquire({ context: "a" }), isAllotmentUnavailableError);
 
     const bypass = await limiter.acquire({ context: "bypass" });
     assert.ok(bypass, "Bypass should work when limit exceeded");

@@ -1,4 +1,6 @@
 import type { AllotmentReservation } from "../AllotmentReservation.js";
+import type { allotmentUnavailableError } from "../errors.js";
+import type { Limiter } from "../Limiter.js";
 import type { MaybePromise } from "./MaybePromise.js";
 
 /**
@@ -45,7 +47,27 @@ export type AcquireOptions<ContextT = void> = {
   signal?: AbortSignal | undefined;
 };
 
-export type AcquireResult = Promise<LimitAllotment | undefined>;
+/**
+ * The result of {@link Limiter.acquire}. It resolves with an allotment, or
+ * rejects:
+ *
+ * - with an {@link allotmentUnavailableError} when the limiter gives no
+ *   allotment. `isAllotmentUnavailableError` tests for it.
+ * - with the signal's `reason` when the caller's signal aborts first.
+ * - with any other error that a strategy, the clock, or another callback
+ *   throws.
+ */
+export type AcquireResult = Promise<LimitAllotment>;
+
+/**
+ * One more attempt to get an allotment, which an
+ * {@link AllotmentUnavailableStrategy} calls while it waits. It resolves with
+ * `undefined` when the acquire strategy still refuses: that is not a final
+ * answer, so the waiting strategy decides what to do next.
+ */
+export type RetryAcquire<ContextT> = (
+  context: ContextT,
+) => Promise<LimitAllotment | undefined>;
 
 /**
  * Read-only view of the limiter's current state, provided to strategies so
@@ -108,6 +130,12 @@ export type AcquireStrategy<ContextT> = {
  * {@link AcquireStrategy} (e.g. queue the caller, reject immediately, or block
  * until a slot is available). Implementations must return an
  * {@link AcquireResult}, which is always a `Promise`.
+ *
+ * When the strategy gives up, it rejects with an
+ * {@link allotmentUnavailableError}. It is the throw site, so it can state
+ * what it knows: a `retryAfter` when it knows when capacity returns, or a
+ * different `load`. When the caller's signal aborts, it rejects with the
+ * signal's `reason`.
  */
 export type AllotmentUnavailableStrategy<ContextT> = {
   /**
@@ -119,12 +147,13 @@ export type AllotmentUnavailableStrategy<ContextT> = {
    *   expected to call later if/when a slot might have opened up. The retry
    *   runs {@link AcquireStrategy.tryReserveAllotment} and, if it grants,
    *   commits the reservation and returns a ready-to-use allotment with all
-   *   required wrapping.
+   *   required wrapping. It resolves with `undefined` if the acquire
+   *   strategy still refuses.
    * @param signal Optional abort signal from the caller.
    */
   onAllotmentUnavailable(
     context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
+    retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
   ): AcquireResult;
 

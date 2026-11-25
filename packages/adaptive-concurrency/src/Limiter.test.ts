@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AllotmentReservation } from "./AllotmentReservation.js";
+import {
+  allotmentUnavailableError,
+  isAllotmentUnavailableError,
+} from "./errors.js";
 import { AIMDLimit } from "./limit/AIMDLimit.js";
 import { FixedLimit } from "./limit/FixedLimit.js";
 import { SettableLimit } from "./limit/SettableLimit.js";
@@ -54,8 +58,11 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       assert.ok(listener, `Should acquire token ${i}`);
     }
 
-    const rejected = await limiter.acquire({ context: "test" });
-    assert.equal(rejected, undefined, "Should reject when at limit");
+    await assert.rejects(
+      limiter.acquire({ context: "test" }),
+      isAllotmentUnavailableError,
+      "Should reject when at limit",
+    );
   });
 
   it("should release limit when allotment completes", async () => {
@@ -66,7 +73,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     const listener1 = await limiter.acquire({ context: "test" });
     assert.ok(listener1);
 
-    assert.equal(await limiter.acquire({ context: "test" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "test" }),
+      isAllotmentUnavailableError,
+    );
 
     await listener1.releaseAndRecordSuccess();
     const listener2 = await limiter.acquire({ context: "test" });
@@ -81,7 +91,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     const listener1 = await limiter.acquire({ context: "normal" });
     assert.ok(listener1);
-    assert.equal(await limiter.acquire({ context: "normal" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "normal" }),
+      isAllotmentUnavailableError,
+    );
 
     const bypass = await limiter.acquire({ context: "admin" });
     assert.ok(bypass, "Admin should bypass the limit");
@@ -95,7 +108,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     const listener1 = await limiter.acquire({ context: "normal" });
     assert.ok(listener1);
-    assert.equal(await limiter.acquire({ context: "normal" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "normal" }),
+      isAllotmentUnavailableError,
+    );
 
     assert.ok(
       await limiter.acquire({ context: "internal-health" }),
@@ -115,7 +131,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     const listener1 = await limiter.acquire({ context: "admin" });
     assert.ok(listener1);
 
-    assert.equal(await limiter.acquire({ context: "admin" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "admin" }),
+      isAllotmentUnavailableError,
+    );
   });
 
   it("should track inflight count correctly", async () => {
@@ -139,7 +158,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     for (let i = 0; i < 5; i++) {
       await limiter.acquire({ context: "test" });
     }
-    assert.equal(await limiter.acquire({ context: "test" }), undefined);
+    await assert.rejects(
+      limiter.acquire({ context: "test" }),
+      isAllotmentUnavailableError,
+    );
 
     limit.setLimit(10);
 
@@ -186,8 +208,11 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     assert.deepEqual(commitCalls, ["a"], "Limiter must commit on success");
     assert.deepEqual(cancelCalls, []);
 
-    const denied = await limiter.acquire({ context: "b" });
-    assert.equal(denied, undefined, "no permits left");
+    await assert.rejects(
+      limiter.acquire({ context: "b" }),
+      isAllotmentUnavailableError,
+      "no permits left",
+    );
     assert.deepEqual(reserveCalls, ["a", "b"]);
     assert.deepEqual(
       cancelCalls,
@@ -208,7 +233,9 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     const limitChanges: Array<{ oldLimit: number; newLimit: number }> = [];
     const rejectionStrategy: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
-        return Promise.resolve(undefined);
+        return Promise.reject(
+          allotmentUnavailableError({ message: "refused" }),
+        );
       },
       onAllotmentReleased() {},
       onLimitChanged(oldLimit, newLimit) {
@@ -465,9 +492,9 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       // Only one slot should be available
       const b = await limiter.acquire({});
       assert.ok(b);
-      assert.equal(
-        await limiter.acquire({}),
-        undefined,
+      await assert.rejects(
+        limiter.acquire({}),
+        isAllotmentUnavailableError,
         "only 1 slot available, not 2 from double-release",
       );
       await b.releaseAndRecordSuccess();
@@ -475,13 +502,15 @@ describe("Limiter (default SemaphoreStrategy)", () => {
   });
 
   describe("abort signal", () => {
-    it("returns undefined when signal is already aborted before acquire", async () => {
+    it("rejects with the abort reason when signal is already aborted before acquire", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(10) });
       const ac = new AbortController();
       ac.abort();
 
-      const result = await limiter.acquire({ signal: ac.signal });
-      assert.equal(result, undefined);
+      await assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        (error) => error === ac.signal.reason,
+      );
       assert.equal(limiter.getInflight(), 0);
     });
 
@@ -514,21 +543,26 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         ),
       );
 
-      const result = await acquirePromise;
-      assert.equal(result, undefined, "should return undefined after abort");
+      await assert.rejects(
+        acquirePromise,
+        (error) => error === ac.signal.reason,
+        "should reject with the abort reason after abort",
+      );
       assert.equal(limiter.getInflight(), 0, "inflight should return to 0");
     });
 
-    it("returns undefined when signal aborts before rejection strategy is entered", async () => {
+    it("rejects with the abort reason when signal aborts before rejection strategy is entered", async () => {
       const ac = new AbortController();
       let retryCalled = false;
 
       const limiter = new Limiter<void>({
         limit: new FixedLimit(1),
         allotmentUnavailableStrategy: {
-          onAllotmentUnavailable(_ctx, retry, signal) {
+          onAllotmentUnavailable() {
             retryCalled = true;
-            return Promise.resolve(undefined);
+            return Promise.reject(
+              allotmentUnavailableError({ message: "refused" }),
+            );
           },
           onAllotmentReleased() {},
         },
@@ -541,8 +575,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       // The abort check happens between tryReserveAllotment failing and
       // entering the rejection strategy.
       ac.abort();
-      const result = await limiter.acquire({ signal: ac.signal });
-      assert.equal(result, undefined);
+      await assert.rejects(
+        limiter.acquire({ signal: ac.signal }),
+        (error) => error === ac.signal.reason,
+      );
       assert.equal(
         retryCalled,
         false,
@@ -570,7 +606,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       const abortedPromise = limiter.acquire({ signal: ac.signal });
 
       ac.abort();
-      assert.equal(await abortedPromise, undefined);
+      await assert.rejects(
+        abortedPromise,
+        (error) => error === ac.signal.reason,
+      );
       assert.equal(
         limiter.getInflight(),
         2,
@@ -610,7 +649,12 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       );
 
       for (const ac of controllers) ac.abort();
-      for (const p of abortPromises) assert.equal(await p, undefined);
+      for (const [i, p] of abortPromises.entries()) {
+        await assert.rejects(
+          p,
+          (error) => error === controllers[i]!.signal.reason,
+        );
+      }
 
       assert.equal(limiter.getInflight(), 3);
 
@@ -643,7 +687,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       const abortedPromise = limiter.acquire({ signal: ac.signal });
 
       ac.abort();
-      assert.equal(await abortedPromise, undefined);
+      await assert.rejects(
+        abortedPromise,
+        (error) => error === ac.signal.reason,
+      );
 
       const nextPromise = limiter.acquire({});
       await holder!.releaseAndRecordSuccess();
@@ -672,6 +719,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
           const allotment = await retry(undefined);
           resolveRetryStarted?.();
           await returnFromStrategy;
+          assert.ok(allotment);
           return allotment;
         },
         onAllotmentReleased() {},
@@ -693,8 +741,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       ac.abort();
       resolveReturnFromStrategy?.();
 
-      const result = await queued;
-      assert.equal(result, undefined);
+      await assert.rejects(queued, (error) => error === ac.signal.reason);
       assert.equal(
         limiter.getInflight(),
         0,
@@ -1116,8 +1163,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
       // Acquire is rejected since limit is 0; nothing inflight, nothing to
       // do. Confirm no probe is armed.
-      const result = await limiter.acquire({});
-      assert.equal(result, undefined);
+      await assert.rejects(limiter.acquire({}), isAllotmentUnavailableError);
       assert.equal(timer.pendingCount(), 0);
 
       limiter.dispose();
@@ -1209,7 +1255,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
               const r = await retry(undefined);
               if (r) return r;
             }
-            return undefined;
+            throw allotmentUnavailableError({ message: "retries exhausted" });
           },
           onAllotmentReleased() {},
         },
@@ -1220,8 +1266,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       assert.ok(holder);
 
       // Issue an acquire that will retry 3 times and ultimately fail.
-      const result = await limiter.acquire({});
-      assert.equal(result, undefined);
+      await assert.rejects(limiter.acquire({}), isAllotmentUnavailableError);
 
       const failed = events.filter(
         (e) => e.id === MetricIds.ACQUIRE_ATTEMPT_NAME && e.status === "failed",
@@ -1251,7 +1296,9 @@ describe("Limiter (default SemaphoreStrategy)", () => {
             const first = await retry(undefined);
             if (first) return first;
             await releaseHolder();
-            return retry(undefined);
+            const second = await retry(undefined);
+            assert.ok(second);
+            return second;
           },
           onAllotmentReleased() {},
         },
@@ -1455,7 +1502,8 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         limit: new FixedLimit(1),
         metricRegistry: throwingRegistry,
         allotmentUnavailableStrategy: {
-          onAllotmentUnavailable: () => Promise.resolve(undefined),
+          onAllotmentUnavailable: () =>
+            Promise.reject(allotmentUnavailableError({ message: "refused" })),
           onAllotmentReleased() {
             releasedNotifications++;
           },
@@ -1660,7 +1708,8 @@ describe("Limiter (default SemaphoreStrategy)", () => {
           },
         },
         allotmentUnavailableStrategy: {
-          onAllotmentUnavailable: () => Promise.resolve(undefined),
+          onAllotmentUnavailable: () =>
+            Promise.reject(allotmentUnavailableError({ message: "refused" })),
           onAllotmentReleased() {},
           onLimitChanged() {
             rejectionStrategyNotified = true;
@@ -1774,6 +1823,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
             const allotment = await retry(undefined);
             resolveRetryStarted?.();
             await returnFromStrategy;
+            assert.ok(allotment);
             return allotment;
           },
           onAllotmentReleased() {},
@@ -1790,8 +1840,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       ac.abort();
       resolveReturnFromStrategy?.();
 
-      const result = await queued;
-      assert.equal(result, undefined);
+      await assert.rejects(queued, (error) => error === ac.signal.reason);
       assert.equal(limiter.getInflight(), 0);
 
       // The retry's tryReserveAllotment did succeed, so we expect an

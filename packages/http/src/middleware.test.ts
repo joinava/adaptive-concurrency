@@ -5,7 +5,11 @@ import type { RequestListener } from "node:http";
 import type { AddressInfo } from "node:net";
 import { concurrencyLimitMiddleware } from "./middleware.js";
 import { HttpLimiterBuilder } from "./HttpLimiterBuilder.js";
-import { FixedLimit, Limiter } from "adaptive-concurrency";
+import {
+  FixedLimit,
+  isAllotmentUnavailableError,
+  Limiter,
+} from "adaptive-concurrency";
 import type { HttpRequest, HttpResponse } from "./middleware.js";
 import type { LimitAllotment } from "adaptive-concurrency";
 
@@ -90,7 +94,7 @@ async function startServer(
   };
 }
 
-function makeMockLimiter(allotment: LimitAllotment | undefined): Limiter<HttpRequest> {
+function makeMockLimiter(allotment: LimitAllotment): Limiter<HttpRequest> {
   return {
     acquire: async () => allotment,
   } as unknown as Limiter<HttpRequest>;
@@ -446,7 +450,7 @@ describe("HttpLimiterBuilder", () => {
       const l = await limiter.acquire({ context: makeReq() });
       assert.ok(l, `Should acquire ${i}`);
     }
-    assert.equal(await limiter.acquire({ context: makeReq() }), undefined);
+    await assert.rejects(limiter.acquire({ context: makeReq() }), isAllotmentUnavailableError);
   });
 
   it("should partition by header", async () => {
@@ -477,7 +481,7 @@ describe("HttpLimiterBuilder", () => {
     // Exhaust limit
     const l1 = await limiter.acquire({ context: makeReq() });
     assert.ok(l1);
-    assert.equal(await limiter.acquire({ context: makeReq() }), undefined);
+    await assert.rejects(limiter.acquire({ context: makeReq() }), isAllotmentUnavailableError);
 
     // Bypass should work
     const bypass = await limiter.acquire({
@@ -493,7 +497,7 @@ describe("HttpLimiterBuilder", () => {
       .build();
 
     await limiter.acquire({ context: makeReq() });
-    assert.equal(await limiter.acquire({ context: makeReq() }), undefined);
+    await assert.rejects(limiter.acquire({ context: makeReq() }), isAllotmentUnavailableError);
 
     const bypass = await limiter.acquire({
       context: makeReq({ method: "OPTIONS" }),
