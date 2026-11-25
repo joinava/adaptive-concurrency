@@ -9,6 +9,16 @@ The package is pre-1.0, so a minor version bump can contain breaking changes.
 
 Releases before 0.14.0 have no entries; see the git history.
 
+## [Unreleased]
+
+### Added
+
+- `LimitAllotment.releaseAndRecordSuccess` and `releaseAndRecordDropped` take
+  an optional `weight`: the amount of work that the operation represented,
+  for example the number of items in a batch call. `Limiter` passes it to the
+  limit algorithm as a new optional last argument of `AdaptiveLimit.addSample`.
+  The built-in limits ignore it, and `WindowedLimit` does not forward it.
+
 ## [0.14.0] - 2026-09-16
 
 ### Breaking

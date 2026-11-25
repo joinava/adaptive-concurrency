@@ -15,8 +15,12 @@ export type LimitAllotment = {
   /**
    * The operation succeeded and internally measured latency should be used as
    * an RTT sample.
+   *
+   * @param weight Optional amount of work that the operation represented,
+   *   for example the number of items in a batch call. It is passed to the
+   *   limit algorithm's `addSample`.
    */
-  releaseAndRecordSuccess(): Promise<void>;
+  releaseAndRecordSuccess(weight?: number): Promise<void>;
 
   /**
    * The operation failed before any meaningful RTT measurement could be made
@@ -28,8 +32,12 @@ export type LimitAllotment = {
    * The request failed and was dropped due to being rejected by an external
    * limit or hitting a timeout. Loss based StreamingLimit implementations will
    * likely do an aggressive reduction in limit when this happens.
+   *
+   * @param weight Optional amount of work that the operation represented,
+   *   for example the number of items in a batch call. It is passed to the
+   *   limit algorithm's `addSample`.
    */
-  releaseAndRecordDropped(): Promise<void>;
+  releaseAndRecordDropped(weight?: number): Promise<void>;
 };
 
 export type AcquireOptions<ContextT = void> = {

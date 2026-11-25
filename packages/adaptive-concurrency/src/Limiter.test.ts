@@ -314,6 +314,68 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     });
   });
 
+  describe("release weight", () => {
+    const recordWeights = () => {
+      const weights: Array<{ didDrop: boolean; weight: number | undefined }> =
+        [];
+      const limit: AdaptiveLimit = {
+        get currentLimit() {
+          return 10;
+        },
+        subscribe() {
+          return () => {};
+        },
+        addSample(
+          _startTime,
+          _rtt,
+          _inflight,
+          didDrop,
+          _operationName,
+          weight,
+        ) {
+          weights.push({ didDrop, weight });
+        },
+      };
+      return { limiter: new Limiter<void>({ limit }), weights };
+    };
+
+    it("passes the weight of a success to addSample", async () => {
+      const { limiter, weights } = recordWeights();
+      const allotment = await limiter.acquire();
+      assert.ok(allotment);
+
+      await allotment.releaseAndRecordSuccess(20);
+
+      assert.deepEqual(weights, [{ didDrop: false, weight: 20 }]);
+    });
+
+    it("passes the weight of a drop to addSample", async () => {
+      const { limiter, weights } = recordWeights();
+      const allotment = await limiter.acquire();
+      assert.ok(allotment);
+
+      await allotment.releaseAndRecordDropped(3);
+
+      assert.deepEqual(weights, [{ didDrop: true, weight: 3 }]);
+    });
+
+    it("passes no weight when the release gives none", async () => {
+      const { limiter, weights } = recordWeights();
+      const first = await limiter.acquire();
+      const second = await limiter.acquire();
+      assert.ok(first);
+      assert.ok(second);
+
+      await first.releaseAndRecordSuccess();
+      await second.releaseAndRecordDropped();
+
+      assert.deepEqual(weights, [
+        { didDrop: false, weight: undefined },
+        { didDrop: true, weight: undefined },
+      ]);
+    });
+  });
+
   describe("idempotent allotment release", () => {
     it("calling releaseAndRecordSuccess twice does not double-decrement inflight", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });

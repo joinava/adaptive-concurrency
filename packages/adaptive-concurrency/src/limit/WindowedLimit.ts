@@ -46,7 +46,8 @@ export interface WindowedLimitOptions {
  * **not** forwarded to the delegate. This means `WindowedLimit` is
  * incompatible with delegates that rely on per-sample operation names
  * (e.g. `GroupAwareLimit`). Wrapping a `GroupAwareLimit` in a
- * `WindowedLimit` will silently disable all group-aware behavior.
+ * `WindowedLimit` will silently disable all group-aware behavior. For the
+ * same reason, the `weight` of each sample is not forwarded either.
  */
 export class WindowedLimit implements AdaptiveLimit {
   private readonly delegate: AdaptiveLimit;

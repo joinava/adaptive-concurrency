@@ -582,7 +582,7 @@ export class Limiter<
     let releaseStarted = false;
 
     return {
-      releaseAndRecordSuccess: async () => {
+      releaseAndRecordSuccess: async (weight?: number) => {
         if (releaseStarted) return;
         releaseStarted = true;
         const endTime = this.safeReadClockWithFallback(undefined);
@@ -629,6 +629,7 @@ export class Limiter<
                 currentInflight,
                 false,
                 operationName,
+                weight,
               );
             }
           }
@@ -666,7 +667,7 @@ export class Limiter<
           await this.rejectionStrategy?.onAllotmentReleased();
         } catch {}
       },
-      releaseAndRecordDropped: async () => {
+      releaseAndRecordDropped: async (weight?: number) => {
         if (releaseStarted) return;
         releaseStarted = true;
 
@@ -693,6 +694,7 @@ export class Limiter<
             currentInflight,
             true,
             operationName,
+            weight,
           );
         } catch {}
         try {
