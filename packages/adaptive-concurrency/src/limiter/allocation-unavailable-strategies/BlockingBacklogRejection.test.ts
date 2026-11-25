@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AllotmentReservation } from "../../AllotmentReservation.js";
-import {
-  allotmentUnavailableError,
-  isAllotmentUnavailableError,
-} from "../../errors.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import type { AcquireResult, LimitAllotment } from "../../Limiter.js";
@@ -36,18 +33,6 @@ async function acquireOk<T>(promise: Promise<Result<T>>): Promise<T> {
 }
 
 /** Whether `error` is the reason of a signal that `abort()` aborted with no reason. */
-/** A retry's result for a test double: the allotment, or still no allotment. */
-function retryResult(
-  allotment: LimitAllotment | undefined,
-): Result<LimitAllotment> {
-  return allotment
-    ? { ok: true, value: allotment }
-    : {
-        ok: false,
-        error: allotmentUnavailableError({ message: "still refused" }),
-      };
-}
-
 function isAbortReason(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -287,7 +272,7 @@ describe("Blocking backlog rejection strategies", () => {
           undefined,
           async () => {
             retryCalls += 1;
-            return retryResult(undefined);
+            return undefined;
           },
           abortController.signal,
         ),
@@ -362,9 +347,9 @@ describe("Blocking backlog rejection strategies", () => {
         timeoutMs: number;
       }) => {
         if (context.id === "stale") {
-          return retryResult(await staleAcquire);
+          return staleAcquire;
         }
-        return retryResult(freshAllotment);
+        return freshAllotment;
       };
 
       const staleRejected = assertUnavailable(
@@ -723,14 +708,14 @@ describe("Blocking backlog rejection strategies", () => {
       const abortablePromise = assert.rejects(
         strategy.onAllotmentUnavailable(
           { id: "aborting", timeoutMs: 5_000 },
-          async () => retryResult(await retryGate),
+          async () => retryGate,
           ac.signal,
         ),
         isAbortReason,
       );
       const stablePromise = strategy.onAllotmentUnavailable(
         { id: "stable", timeoutMs: 5_000 },
-        async () => retryResult(allotment),
+        async () => allotment,
       );
 
       // Start draining — will call retry for the "aborting" waiter
@@ -771,7 +756,7 @@ describe("Blocking backlog rejection strategies", () => {
           undefined,
           async () => {
             retryCalls += 1;
-            return retryResult(undefined);
+            return undefined;
           },
           abortController.signal,
         ),
@@ -817,9 +802,9 @@ describe("Blocking backlog rejection strategies", () => {
         timeoutMs: number;
       }) => {
         if (context.id === "stale") {
-          return retryResult(await staleAcquire);
+          return staleAcquire;
         }
-        return retryResult(freshAllotment);
+        return freshAllotment;
       };
 
       const freshPromise = strategy.onAllotmentUnavailable(
@@ -1109,7 +1094,7 @@ describe("Blocking backlog rejection strategies", () => {
 
       const stablePromise = strategy.onAllotmentUnavailable(
         { id: "stable", timeoutMs: 5_000 },
-        async () => retryResult(allotment),
+        async () => allotment,
       );
 
       const ac = new AbortController();
@@ -1117,7 +1102,7 @@ describe("Blocking backlog rejection strategies", () => {
       const abortablePromise = assert.rejects(
         strategy.onAllotmentUnavailable(
           { id: "aborting", timeoutMs: 5_000 },
-          async () => retryResult(await retryGate),
+          async () => retryGate,
           ac.signal,
         ),
         isAbortReason,

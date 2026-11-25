@@ -163,8 +163,8 @@ export class BlockingBacklogRejection<
         const waiter = queuedWaiter.value;
 
         this.releaseDuringDrain = false;
-        const retried = await waiter.retry(waiter.context);
-        if (!retried.ok) {
+        const allotment = await waiter.retry(waiter.context);
+        if (!allotment) {
           if (this.releaseDuringDrain) {
             // A slot was released while retry was in-flight but the
             // notification was suppressed by drainInProgress. Retry the
@@ -173,7 +173,6 @@ export class BlockingBacklogRejection<
           }
           return;
         }
-        const allotment = retried.value;
 
         if (!this.queue.removeByHandle(queuedWaiter.handle)) {
           // Waiter expired while retry was in-flight. Release the acquired slot

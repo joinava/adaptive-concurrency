@@ -57,18 +57,6 @@ const NO_ALLOTMENT_AND_NO_STRATEGY = Object.freeze({
   }),
 } as const);
 
-/**
- * The result of a retry that gets no allotment, because the acquire strategy
- * still refuses or the caller's signal has aborted. Made once, for the same
- * reason as {@link NO_ALLOTMENT_AND_NO_STRATEGY}: do not mutate its error.
- */
-const STILL_REFUSED = Object.freeze({
-  ok: false,
-  error: allotmentUnavailableError({
-    message: "No allotment is available: the acquire strategy still refuses",
-  }),
-} as const);
-
 let idCounter = 0;
 
 const defaultClock = (): number => performance.now();
@@ -525,10 +513,9 @@ export class Limiter<
 
     const retry: RetryAcquire<Context> = async (retryCtx) => {
       if (signal?.aborted) {
-        return STILL_REFUSED;
+        return undefined;
       }
-      const allotment = await this.tryAcquireCore(retryCtx, acquireStart);
-      return allotment ? { ok: true, value: allotment } : STILL_REFUSED;
+      return this.tryAcquireCore(retryCtx, acquireStart);
     };
 
     // A rejection is an abort, or a fault in the strategy. Neither is an
