@@ -41,6 +41,22 @@ export {
 // ---------------------------------------------------------------------------
 // Limiter options
 // ---------------------------------------------------------------------------
+/**
+ * The result of an acquire that gets no allotment when the limiter has no
+ * {@link AllotmentUnavailableStrategy}. Made once, because refusals are
+ * common under load, and a new error would capture a stack trace for each
+ * one. So its stack points at module load, and every refusal from this site
+ * shares the error: do not mutate it. A site that needs a per-call fact,
+ * such as a `retryAfter`, makes its own error instead.
+ */
+const NO_ALLOTMENT_AND_NO_STRATEGY = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message:
+      "No allotment is available, and the limiter has no strategy to wait for one",
+  }),
+} as const);
+
 let idCounter = 0;
 
 const defaultClock = (): number => performance.now();
@@ -487,13 +503,7 @@ export class Limiter<
     const rejectionStrategy = this.rejectionStrategy;
     if (!rejectionStrategy) {
       recordFinalAcquireFailed();
-      return {
-        ok: false,
-        error: allotmentUnavailableError({
-          message:
-            "No allotment is available, and the limiter has no strategy to wait for one",
-        }),
-      };
+      return NO_ALLOTMENT_AND_NO_STRATEGY;
     }
 
     // If the signal aborted here, there is nothing to clean up, as we didn't

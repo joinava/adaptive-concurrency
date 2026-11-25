@@ -5,6 +5,20 @@ import type {
   RetryAcquire,
 } from "../../types/Strategy.js";
 
+/**
+ * The result after the delay before refusal. Made once, because refusals are
+ * common under load, and a new error would capture a stack trace for each
+ * one. So its stack points at module load, and every refusal from this site
+ * shares the error: do not mutate it. A site that needs a per-call fact,
+ * such as a `retryAfter`, makes its own error instead.
+ */
+const DELAYED_REFUSAL = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message: "No allotment is available, and the delay before refusal ended",
+  }),
+} as const);
+
 export interface DelayedRejectStrategyOptions<ContextT> {
   /**
    * Milliseconds to wait before resolving with no allotment. Return 0 to
@@ -53,13 +67,7 @@ export class DelayedRejectStrategy<
     signal?: AbortSignal,
   ): AcquireResult {
     await this.delay(context, signal);
-    return {
-      ok: false,
-      error: allotmentUnavailableError({
-        message:
-          "No allotment is available, and the delay before refusal ended",
-      }),
-    };
+    return DELAYED_REFUSAL;
   }
 
   onAllotmentReleased(): void {

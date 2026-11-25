@@ -14,6 +14,35 @@ export type Waiter<ContextT> = {
   resolve: (allotment: LimitAllotment) => void;
 };
 
+/**
+ * The result when the backlog is full. Made once, because refusals are
+ * common under load, and a new error would capture a stack trace for each
+ * one. So its stack points at module load, and every refusal from this site
+ * shares the error: do not mutate it. A site that needs a per-call fact,
+ * such as a `retryAfter`, makes its own error instead.
+ */
+const BACKLOG_FULL = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message: "No allotment is available, and the backlog is full",
+  }),
+} as const);
+
+/**
+ * The result when a request waits in the backlog for its whole timeout. Made
+ * once, because refusals are common under load, and a new error would
+ * capture a stack trace for each one. So its stack points at module load,
+ * and every refusal from this site shares the error: do not mutate it. A
+ * site that needs a per-call fact, such as a `retryAfter`, makes its own
+ * error instead.
+ */
+const BACKLOG_TIMEOUT = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message: "No allotment became available within the backlog timeout",
+  }),
+} as const);
+
 export const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
 
 export type BlockingBacklogRejectionOptions<
@@ -100,12 +129,7 @@ export class BlockingBacklogRejection<
     }
 
     if (this.queue.size() >= this.backlogSize) {
-      return Promise.resolve({
-        ok: false,
-        error: allotmentUnavailableError({
-          message: "No allotment is available, and the backlog is full",
-        }),
-      });
+      return Promise.resolve(BACKLOG_FULL);
     }
 
     return this.waitInBacklog(context, retry, signal);
@@ -211,16 +235,7 @@ export class BlockingBacklogRejection<
       const { handle } = this.queue.enqueue(waiter, enqueueOptions);
       this.scheduleDrain();
 
-      const timer = setTimeout(
-        () =>
-          settle({
-            ok: false,
-            error: allotmentUnavailableError({
-              message: `No allotment became available within the backlog timeout of ${timeout} ms`,
-            }),
-          }),
-        timeout,
-      );
+      const timer = setTimeout(() => settle(BACKLOG_TIMEOUT), timeout);
       const onAbort = (): void => settle(undefined);
       const cleanup = (): void => {
         clearTimeout(timer);
