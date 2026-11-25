@@ -1,8 +1,4 @@
-import {
-  isAllotmentUnavailableError,
-  type Limiter,
-  type LimitAllotment,
-} from "adaptive-concurrency";
+import { type Limiter } from "adaptive-concurrency";
 
 /**
  * Minimal request interface compatible with Node.js IncomingMessage,
@@ -82,15 +78,13 @@ export function concurrencyLimitMiddleware(
     });
 
   return async (req: HttpRequest, res: HttpResponse, next: NextFunction) => {
-    let allotment: LimitAllotment;
-    try {
-      allotment = await limiter.acquire({ context: req });
-    } catch (error) {
-      if (!isAllotmentUnavailableError(error)) throw error;
+    const acquired = await limiter.acquire({ context: req });
+    if (!acquired.ok) {
       res.statusCode = throttleStatus;
       res.end(throttleMessage);
       return;
     }
+    const allotment = acquired.value;
 
     let released = false;
     const releaseSuccess = async () => {

@@ -9,8 +9,18 @@ import type {
   LimitAllotment,
   RetryAcquire,
 } from "../../Limiter.js";
+import type { Result } from "../../types/Strategy.js";
 import { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 import { DelayedThenBlockingRejection } from "./DelayedThenBlockingRejection.js";
+
+/** Asserts that `promise` resolves with no allotment and an unavailable-allotment error. */
+async function assertUnavailable(
+  promise: Promise<Result<unknown>>,
+): Promise<void> {
+  const result = await promise;
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && isAllotmentUnavailableError(result.error));
+}
 
 describe("DelayedThenBlockingRejection", () => {
   it("applies delay before delegating to blocking strategy", async () => {
@@ -18,9 +28,10 @@ describe("DelayedThenBlockingRejection", () => {
     const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
         delegateCalledAt = performance.now();
-        return Promise.reject(
-          allotmentUnavailableError({ message: "refused" }),
-        );
+        return Promise.resolve({
+          ok: false,
+          error: allotmentUnavailableError({ message: "refused" }),
+        });
       },
       onAllotmentReleased() {},
     };
@@ -33,9 +44,8 @@ describe("DelayedThenBlockingRejection", () => {
     });
 
     const start = performance.now();
-    await assert.rejects(
+    await assertUnavailable(
       strategy.onAllotmentUnavailable("a", async () => undefined),
-      isAllotmentUnavailableError,
     );
     const elapsed = delegateCalledAt - start;
     assert.ok(
@@ -48,9 +58,10 @@ describe("DelayedThenBlockingRejection", () => {
     let releaseCalls = 0;
     const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
-        return Promise.reject(
-          allotmentUnavailableError({ message: "refused" }),
-        );
+        return Promise.resolve({
+          ok: false,
+          error: allotmentUnavailableError({ message: "refused" }),
+        });
       },
       onAllotmentReleased() {
         releaseCalls++;
@@ -72,9 +83,10 @@ describe("DelayedThenBlockingRejection", () => {
     const limitChanges: Array<{ oldLimit: number; newLimit: number }> = [];
     const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
-        return Promise.reject(
-          allotmentUnavailableError({ message: "refused" }),
-        );
+        return Promise.resolve({
+          ok: false,
+          error: allotmentUnavailableError({ message: "refused" }),
+        });
       },
       onAllotmentReleased() {},
       onLimitChanged(oldLimit, newLimit) {
@@ -102,7 +114,10 @@ describe("DelayedThenBlockingRejection", () => {
 
     const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable(_context: string, retry: RetryAcquire<string>) {
-        return retry("a").then((value) => value ?? allotment);
+        return retry("a").then((value) => ({
+          ok: true,
+          value: value ?? allotment,
+        }));
       },
       onAllotmentReleased() {},
     };
@@ -118,7 +133,8 @@ describe("DelayedThenBlockingRejection", () => {
       "a",
       async () => undefined,
     );
-    assert.equal(out, allotment);
+    assert.ok(out.ok);
+    assert.equal(out.value, allotment);
   });
 
   it("rejects with the signal's reason when the signal aborts during the delay", async () => {
@@ -126,9 +142,10 @@ describe("DelayedThenBlockingRejection", () => {
     const blocking: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
         delegateCalls++;
-        return Promise.reject(
-          allotmentUnavailableError({ message: "refused" }),
-        );
+        return Promise.resolve({
+          ok: false,
+          error: allotmentUnavailableError({ message: "refused" }),
+        });
       },
       onAllotmentReleased() {},
     };

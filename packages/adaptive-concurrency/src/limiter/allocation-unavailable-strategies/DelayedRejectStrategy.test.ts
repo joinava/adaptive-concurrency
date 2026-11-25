@@ -3,10 +3,20 @@ import { describe, it } from "node:test";
 import { isAllotmentUnavailableError } from "../../errors.js";
 import { Limiter } from "../../Limiter.js";
 import { FixedLimit } from "../../limit/FixedLimit.js";
+import type { Result } from "../../types/Strategy.js";
 import { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 
+/** Asserts that `promise` resolves with no allotment and an unavailable-allotment error. */
+async function assertUnavailable(
+  promise: Promise<Result<unknown>>,
+): Promise<void> {
+  const result = await promise;
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && isAllotmentUnavailableError(result.error));
+}
+
 describe("DelayedRejectStrategy", () => {
-  it("rejects with an unavailable allotment immediately when delay is 0", async () => {
+  it("resolves with no allotment immediately when delay is 0", async () => {
     const limiter = new Limiter<string>({
       limit: new FixedLimit(1),
       allotmentUnavailableStrategy: new DelayedRejectStrategy({
@@ -17,10 +27,10 @@ describe("DelayedRejectStrategy", () => {
     void limiter.acquire({ context: "a" });
     const p = limiter.acquire({ context: "b" });
     assert.ok(p instanceof Promise);
-    await assert.rejects(p, isAllotmentUnavailableError);
+    await assertUnavailable(p);
   });
 
-  it("waits delay ms before rejecting with an unavailable allotment", async () => {
+  it("waits delay ms before resolving with no allotment", async () => {
     const delayMs = 30;
     const limiter = new Limiter<string>({
       limit: new FixedLimit(1),
@@ -33,7 +43,7 @@ describe("DelayedRejectStrategy", () => {
     const start = performance.now();
     const p = limiter.acquire({ context: "b" });
     assert.ok(p instanceof Promise);
-    await assert.rejects(p, isAllotmentUnavailableError);
+    await assertUnavailable(p);
     assert.ok(performance.now() - start >= delayMs - 5);
   });
 
@@ -50,14 +60,14 @@ describe("DelayedRejectStrategy", () => {
     const slow = limiter.acquire({ context: "b" });
     const fast = limiter.acquire({ context: "c" });
 
-    const slowRejected = assert.rejects(slow, isAllotmentUnavailableError);
+    const slowRefused = assertUnavailable(slow);
     const t0 = performance.now();
-    await assert.rejects(fast, isAllotmentUnavailableError);
+    await assertUnavailable(fast);
     assert.ok(
       performance.now() - t0 < 20,
       "third acquire should not wait 50ms",
     );
-    await slowRejected;
+    await slowRefused;
   });
 
   it("respects AbortSignal during delay", async () => {

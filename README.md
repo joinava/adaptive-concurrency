@@ -119,7 +119,7 @@ Notes:
 - Returning a non-`RunResult` value is shorthand for `return success(value)`.
 - Throwing a non-`RunResult` error is shorthand for `throw ignore(error)`.
 - Returning `dropped(error)` is invalid; use `throw dropped(error)` for drop semantics.
-- If `acquire` rejects with an `allotmentUnavailableError`, `callWithLimiter` resolves with `{ ok: false, error }` and does not call `fn`. Any other rejection of `acquire`, such as the signal's reason after an abort, rejects `callWithLimiter`.
+- If `acquire` gives no allotment, `callWithLimiter` resolves with its `{ ok: false, error }` and does not call `fn`. `error` is an `allotmentUnavailableError`. If `acquire` rejects, for example with the signal's reason after an abort, `callWithLimiter` rejects too.
 
 For advanced usage patterns—including `withLimiter(limiter)` and direct `acquire` flows—see [Advanced usage patterns](./docs/ADVANCED_USAGE_PATTERNS.md).
 
@@ -198,14 +198,14 @@ Decorator that buffers samples into time-based windows before forwarding aggrega
 
 - **`Limiter`** — Composable limiter: adaptive `limit`, optional bypass, **`SemaphoreStrategy`** (default) or custom **`AcquireStrategy`**, optional **`allotmentUnavailableStrategy`**, optional **`operationNameFor`** to tag samples for group-aware limits, and optional **`stallDetection`** (see below).
 - **`AcquireStrategy`** — Two-phase admission contract. `tryReserveAllotment(context, state)` returns an `AllotmentReservation` when capacity is tentatively reserved; the limiter then calls `commit()` when admission succeeds or `cancel()` when an outer decision rejects/aborts before the allotment is returned. This lets composed strategies reserve locally without emitting metrics or waking waiters until the overall acquire succeeds.
-- **`Limiter.acquire()`** — Resolves with a `LimitAllotment`. It rejects with an `allotmentUnavailableError` when the limiter gives no allotment (test with `isAllotmentUnavailableError`), and with the signal's `reason` when the signal aborts first.
+- **`Limiter.acquire()`** — Resolves with `{ ok: true, value }`, where `value` is a `LimitAllotment`, or with `{ ok: false, error }` when the limiter gives no allotment. `error` is an `allotmentUnavailableError`. It rejects with the signal's `reason` when the signal aborts first.
 - **`LimitAllotment`** — Handle returned from `Limiter.acquire()`. Call exactly one release method: `releaseAndRecordSuccess()`, `releaseAndIgnore()`, or `releaseAndRecordDropped()`. `releaseAndRecordSuccess` and `releaseAndRecordDropped` take an optional `weight`, which is passed to `AdaptiveLimit.addSample`.
 - **`AllotmentReservation`** — Helper class for implementing two-phase `AcquireStrategy` instances. Its `commit()` and `cancel()` methods are idempotent.
 - **`PartitionedStrategy`** — Percentage-based partitions with configurable `burstMode` (`unbounded`, `capped`, `none`) per partition. It tracks speculative reservations separately from committed inflight work so cancelled reservations do not pollute partition metrics.
 - **`BlockingBacklogRejection`** — Generic queue-based blocking strategy used for both FIFO and LIFO behavior. Configure `backlogSize`, `backlogTimeout` (`number` or `(context) => number`), and `enqueueOptions` (`{ direction: "back" }` for FIFO/fair or `{ direction: "front" }` for LIFO/tail-latency focused). `enqueueOptions` can also include `priority` and can be context-derived via a function. Enqueue-triggered drains are coalesced and only retry the queue head, avoiding lost wakeups without fanning out retries across the whole queue.
-- **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still reject with an `allotmentUnavailableError` (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
+- **`DelayedRejectStrategy`** — When at capacity, await a caller-defined delay (`delayMsForContext`) then still give no allotment (Java-style partition reject delay). Cap concurrent delays with `maxConcurrentDelays`. Does not retry for capacity.
 - **`DelayedThenBlockingRejection`** — Two-stage behavior: unconditionally delay first (as a form of backpressure), then queue and block if there's still no available allotment.
-- **`AllotmentUnavailableStrategy`** — Contract for what happens when the acquire strategy refuses. To give up, a strategy rejects with an `allotmentUnavailableError`. It can state a `retryAfter`, or a different `load`, when it knows more. On abort, it rejects with the signal's `reason`.
+- **`AllotmentUnavailableStrategy`** — Contract for what happens when the acquire strategy refuses. It resolves with the same result as `acquire()`. To give up, it resolves with `{ ok: false, error }`, where `error` is an `allotmentUnavailableError` that it makes, so it can state a `retryAfter`, or a different `load`, when it knows more. On abort, it rejects with the signal's `reason`.
 
 ## Errors
 

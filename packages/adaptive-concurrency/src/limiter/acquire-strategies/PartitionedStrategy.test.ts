@@ -15,7 +15,7 @@ import {
   type MetricRegistry,
 } from "../../MetricRegistry.js";
 import { isAllotmentUnavailableError } from "../../errors.js";
-import type { AcquireOptions, LimitAllotment } from "../../types/Strategy.js";
+import type { AcquireOptions, AcquireResult, LimitAllotment } from "../../types/Strategy.js";
 
 function makeRecordingRegistry(): {
   registry: MetricRegistry;
@@ -71,12 +71,10 @@ async function acquireOrUndefined<ContextT>(
   limiter: Limiter<ContextT>,
   options: AcquireOptions<ContextT>,
 ): Promise<LimitAllotment | undefined> {
-  try {
-    return await limiter.acquire(options);
-  } catch (error) {
-    if (isAllotmentUnavailableError(error)) return undefined;
-    throw error;
-  }
+  const result = await limiter.acquire(options);
+  if (result.ok) return result.value;
+  assert.ok(isAllotmentUnavailableError(result.error));
+  return undefined;
 }
 
 describe("PartitionedStrategy", () => {
@@ -177,25 +175,23 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 3; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOk(limiter, { context: "a" });
       assert.ok(l, `Should acquire a[${i}]`);
       listeners.push(l!);
     }
     for (let i = 0; i < 7; i++) {
-      const l = await limiter.acquire({ context: "b" });
+      const l = await acquireOk(limiter, { context: "b" });
       assert.ok(l, `Should acquire b[${i}]`);
       listeners.push(l!);
     }
 
-    await assert.rejects(
+    await assertUnavailable(
       limiter.acquire({ context: "a" }),
-      isAllotmentUnavailableError,
       "Should reject a when its partition limit is reached",
     );
 
-    await assert.rejects(
+    await assertUnavailable(
       limiter.acquire({ context: "b" }),
-      isAllotmentUnavailableError,
       "Should reject b when its partition limit is reached",
     );
   });
@@ -210,15 +206,15 @@ describe("PartitionedStrategy", () => {
       },
     });
 
-    const l1 = await limiter.acquire({ context: "a" });
-    const l2 = await limiter.acquire({ context: "b" });
+    const l1 = await acquireOk(limiter, { context: "a" });
+    const l2 = await acquireOk(limiter, { context: "b" });
     assert.ok(l1 && l2);
 
-    await assert.rejects(limiter.acquire({ context: "a" }), isAllotmentUnavailableError);
+    await assertUnavailable(limiter.acquire({ context: "a" }));
 
     await l1.releaseAndRecordSuccess();
 
-    const l3 = await limiter.acquire({ context: "a" });
+    const l3 = await acquireOk(limiter, { context: "a" });
     assert.ok(l3, "Should acquire after release");
   });
 
@@ -244,7 +240,7 @@ describe("PartitionedStrategy", () => {
 
     limit.setLimit(20);
 
-    const extra = await limiter.acquire({ context: "a" });
+    const extra = await acquireOk(limiter, { context: "a" });
     assert.ok(extra, "Should acquire after limit increase");
   });
 
@@ -258,12 +254,12 @@ describe("PartitionedStrategy", () => {
       bypassResolver: (ctx) => ctx === "bypass",
     });
 
-    const l1 = await limiter.acquire({ context: "a" });
+    const l1 = await acquireOk(limiter, { context: "a" });
     assert.ok(l1);
 
-    await assert.rejects(limiter.acquire({ context: "a" }), isAllotmentUnavailableError);
+    await assertUnavailable(limiter.acquire({ context: "a" }));
 
-    const bypass = await limiter.acquire({ context: "bypass" });
+    const bypass = await acquireOk(limiter, { context: "bypass" });
     assert.ok(bypass, "Bypass should work when limit exceeded");
   });
 
@@ -413,3 +409,21 @@ describe("PartitionedStrategy", () => {
     });
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(
+  acquired: AcquireResult,
+  message?: string,
+): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false, message);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

@@ -32,13 +32,13 @@ export type {
   LimitAllotment,
   LimiterState,
   MaybePromise,
+  Result,
   RetryAcquire,
 } from "./types/index.js";
 export {
   makeLimitedFunction,
   withLimiter,
   type CallWithLimiter,
-  type LimitedCallResult,
   type RunCallbackArgs,
 } from "./withLimiter.js";
 export {

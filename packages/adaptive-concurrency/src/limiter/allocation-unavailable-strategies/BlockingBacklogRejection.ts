@@ -1,7 +1,9 @@
 import { allotmentUnavailableError } from "../../errors.js";
 import type {
+  AcquireResult,
   AllotmentUnavailableStrategy,
   LimitAllotment,
+  Result,
   RetryAcquire,
 } from "../../types/Strategy.js";
 import type { EnqueueOptions } from "../../utils/LinkedWaiterQueue.js";
@@ -83,8 +85,8 @@ export class BlockingBacklogRejection<
   }
 
   /**
-   * Waits in the backlog until a retry gets an allotment. Rejects with an
-   * `allotmentUnavailableError` when the backlog is full, or when the wait
+   * Waits in the backlog until a retry gets an allotment. Resolves with
+   * `{ ok: false, error }` when the backlog is full, or when the wait
    * reaches the backlog timeout. Rejects with the signal's reason when the
    * signal aborts.
    */
@@ -92,17 +94,18 @@ export class BlockingBacklogRejection<
     context: ContextT,
     retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment> {
+  ): AcquireResult {
     if (signal?.aborted) {
       return Promise.reject(signal.reason);
     }
 
     if (this.queue.size() >= this.backlogSize) {
-      return Promise.reject(
-        allotmentUnavailableError({
+      return Promise.resolve({
+        ok: false,
+        error: allotmentUnavailableError({
           message: "No allotment is available, and the backlog is full",
         }),
-      );
+      });
     }
 
     return this.waitInBacklog(context, retry, signal);
@@ -185,26 +188,23 @@ export class BlockingBacklogRejection<
     context: ContextT,
     retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment> {
+  ): AcquireResult {
     const timeout = this.getBacklogTimeout(context);
-    return new Promise<LimitAllotment>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
-      const settle = (
-        outcome:
-          | { ok: true; allotment: LimitAllotment }
-          | { ok: false; error: unknown },
-      ): void => {
+      // `undefined` is an abort, which rejects with the signal's reason.
+      const settle = (result: Result<LimitAllotment> | undefined): void => {
         if (settled) return;
         settled = true;
         cleanup();
-        if (outcome.ok) resolve(outcome.allotment);
-        else reject(outcome.error);
+        if (result) resolve(result);
+        else reject(signal?.reason);
       };
 
       const waiter: Waiter<ContextT> = {
         context,
         retry,
-        resolve: (allotment) => settle({ ok: true, allotment }),
+        resolve: (allotment) => settle({ ok: true, value: allotment }),
       };
 
       const enqueueOptions = this.getEnqueueOptions(context);
@@ -221,7 +221,7 @@ export class BlockingBacklogRejection<
           }),
         timeout,
       );
-      const onAbort = (): void => settle({ ok: false, error: signal?.reason });
+      const onAbort = (): void => settle(undefined);
       const cleanup = (): void => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);

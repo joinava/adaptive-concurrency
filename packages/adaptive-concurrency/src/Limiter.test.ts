@@ -10,9 +10,12 @@ import { FixedLimit } from "./limit/FixedLimit.js";
 import { SettableLimit } from "./limit/SettableLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import type {
+  AcquireOptions,
   AcquireStrategy,
   AllotmentUnavailableStrategy,
-} from "./Limiter.js";
+  LimitAllotment,
+  Result,
+} from "./types/Strategy.js";
 import { Limiter, sharedStallLogs } from "./Limiter.js";
 import {
   BlockingBacklogRejection,
@@ -28,6 +31,26 @@ import type {
 import { MetricIds } from "./MetricRegistry.js";
 import { AdaptiveTimeoutError, isAdaptiveTimeoutError } from "./RunResult.js";
 import { LinkedWaiterQueue } from "./utils/LinkedWaiterQueue.js";
+
+/** Acquires, and asserts that the limiter gave an allotment. */
+async function acquireOk<ContextT>(
+  limiter: Limiter<ContextT>,
+  options?: AcquireOptions<ContextT>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+/** Asserts that an acquire resolved without an allotment. */
+async function assertUnavailable(
+  pending: Promise<Result<LimitAllotment>>,
+  message = "expected no allotment",
+): Promise<void> {
+  const result = await pending;
+  assert.equal(result.ok, false, message);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}
 
 type BlockingOptions<ContextT> = Partial<
   Pick<
@@ -54,14 +77,13 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     });
 
     for (let i = 0; i < 10; i++) {
-      const listener = await limiter.acquire({ context: "test" });
+      const listener = await acquireOk(limiter, { context: "test" });
       assert.ok(listener, `Should acquire token ${i}`);
     }
 
-    await assert.rejects(
+    await assertUnavailable(
       limiter.acquire({ context: "test" }),
-      isAllotmentUnavailableError,
-      "Should reject when at limit",
+      "Should give no allotment when at limit",
     );
   });
 
@@ -70,16 +92,13 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       limit: new FixedLimit(1),
     });
 
-    const listener1 = await limiter.acquire({ context: "test" });
+    const listener1 = await acquireOk(limiter, { context: "test" });
     assert.ok(listener1);
 
-    await assert.rejects(
-      limiter.acquire({ context: "test" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "test" }));
 
     await listener1.releaseAndRecordSuccess();
-    const listener2 = await limiter.acquire({ context: "test" });
+    const listener2 = await acquireOk(limiter, { context: "test" });
     assert.ok(listener2, "Should be able to acquire after release");
   });
 
@@ -89,14 +108,11 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       bypassResolver: (ctx) => ctx === "admin",
     });
 
-    const listener1 = await limiter.acquire({ context: "normal" });
+    const listener1 = await acquireOk(limiter, { context: "normal" });
     assert.ok(listener1);
-    await assert.rejects(
-      limiter.acquire({ context: "normal" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "normal" }));
 
-    const bypass = await limiter.acquire({ context: "admin" });
+    const bypass = await acquireOk(limiter, { context: "admin" });
     assert.ok(bypass, "Admin should bypass the limit");
   });
 
@@ -106,19 +122,16 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       bypassResolver: (ctx) => ctx.startsWith("internal-") || ctx === "admin",
     });
 
-    const listener1 = await limiter.acquire({ context: "normal" });
+    const listener1 = await acquireOk(limiter, { context: "normal" });
     assert.ok(listener1);
-    await assert.rejects(
-      limiter.acquire({ context: "normal" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "normal" }));
 
     assert.ok(
-      await limiter.acquire({ context: "internal-health" }),
+      (await limiter.acquire({ context: "internal-health" })).ok,
       "Internal request should bypass",
     );
     assert.ok(
-      await limiter.acquire({ context: "admin" }),
+      (await limiter.acquire({ context: "admin" })).ok,
       "Admin should bypass",
     );
   });
@@ -128,13 +141,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       limit: new FixedLimit(1),
     });
 
-    const listener1 = await limiter.acquire({ context: "admin" });
+    const listener1 = await acquireOk(limiter, { context: "admin" });
     assert.ok(listener1);
 
-    await assert.rejects(
-      limiter.acquire({ context: "admin" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "admin" }));
   });
 
   it("should track inflight count correctly", async () => {
@@ -144,7 +154,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     assert.equal(limiter.getInflight(), 0);
 
-    const listener = (await limiter.acquire({ context: "test" }))!;
+    const listener = await acquireOk(limiter, { context: "test" });
     assert.equal(limiter.getInflight(), 1);
 
     await listener.releaseAndRecordSuccess();
@@ -156,16 +166,13 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     const limiter = new Limiter<string>({ limit });
 
     for (let i = 0; i < 5; i++) {
-      await limiter.acquire({ context: "test" });
+      await acquireOk(limiter, { context: "test" });
     }
-    await assert.rejects(
-      limiter.acquire({ context: "test" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "test" }));
 
     limit.setLimit(10);
 
-    const extra = await limiter.acquire({ context: "test" });
+    const extra = await acquireOk(limiter, { context: "test" });
     assert.ok(extra, "Should acquire after limit increase");
   });
 
@@ -202,15 +209,14 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       acquireStrategy,
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first, "first acquire is admitted");
     assert.deepEqual(reserveCalls, ["a"]);
     assert.deepEqual(commitCalls, ["a"], "Limiter must commit on success");
     assert.deepEqual(cancelCalls, []);
 
-    await assert.rejects(
+    await assertUnavailable(
       limiter.acquire({ context: "b" }),
-      isAllotmentUnavailableError,
       "no permits left",
     );
     assert.deepEqual(reserveCalls, ["a", "b"]);
@@ -223,7 +229,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     await first.releaseAndRecordSuccess();
     assert.deepEqual(releasedCalls, ["a"]);
 
-    const third = await limiter.acquire({ context: "c" });
+    const third = await acquireOk(limiter, { context: "c" });
     assert.ok(third, "permit returned via release; next acquire is admitted");
     assert.deepEqual(commitCalls, ["a", "c"]);
   });
@@ -233,9 +239,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     const limitChanges: Array<{ oldLimit: number; newLimit: number }> = [];
     const rejectionStrategy: AllotmentUnavailableStrategy<string> = {
       onAllotmentUnavailable() {
-        return Promise.reject(
-          allotmentUnavailableError({ message: "refused" }),
-        );
+        return Promise.resolve({
+          ok: false,
+          error: allotmentUnavailableError({ message: "refused" }),
+        });
       },
       onAllotmentReleased() {},
       onLimitChanged(oldLimit, newLimit) {
@@ -257,10 +264,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       limit: new FixedLimit(1),
     });
 
-    const listener = (await limiter.acquire({ context: "test" }))!;
+    const listener = await acquireOk(limiter, { context: "test" });
     await listener.releaseAndIgnore();
 
-    const next = await limiter.acquire({ context: "test" });
+    const next = await acquireOk(limiter, { context: "test" });
     assert.ok(next, "Should acquire after releaseAndIgnore release");
   });
 
@@ -269,10 +276,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       limit: new FixedLimit(1),
     });
 
-    const listener = (await limiter.acquire({ context: "test" }))!;
+    const listener = await acquireOk(limiter, { context: "test" });
     await listener.releaseAndRecordDropped();
 
-    const next = await limiter.acquire({ context: "test" });
+    const next = await acquireOk(limiter, { context: "test" });
     assert.ok(next, "Should acquire after releaseAndRecordDropped release");
   });
 
@@ -320,7 +327,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       clock: () => now,
     });
 
-    const allotment = await limiter.acquire({ context: "test" });
+    const allotment = await acquireOk(limiter, { context: "test" });
     assert.ok(allotment);
 
     now = 130;
@@ -368,7 +375,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("passes the weight of a success to addSample", async () => {
       const { limiter, weights } = recordWeights();
-      const allotment = await limiter.acquire();
+      const allotment = await acquireOk(limiter);
       assert.ok(allotment);
 
       await allotment.releaseAndRecordSuccess(20);
@@ -378,7 +385,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("passes the weight of a drop to addSample", async () => {
       const { limiter, weights } = recordWeights();
-      const allotment = await limiter.acquire();
+      const allotment = await acquireOk(limiter);
       assert.ok(allotment);
 
       await allotment.releaseAndRecordDropped(3);
@@ -388,8 +395,8 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("passes no weight when the release gives none", async () => {
       const { limiter, weights } = recordWeights();
-      const first = await limiter.acquire();
-      const second = await limiter.acquire();
+      const first = await acquireOk(limiter);
+      const second = await acquireOk(limiter);
       assert.ok(first);
       assert.ok(second);
 
@@ -406,7 +413,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
   describe("idempotent allotment release", () => {
     it("calling releaseAndRecordSuccess twice does not double-decrement inflight", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       assert.equal(limiter.getInflight(), 1);
@@ -418,7 +425,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("calling releaseAndIgnore twice does not double-decrement inflight", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       await a.releaseAndIgnore();
@@ -429,7 +436,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("calling releaseAndRecordDropped twice does not double-decrement inflight", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       await a.releaseAndRecordDropped();
@@ -440,7 +447,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("calling different release methods on the same allotment only runs the first", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       assert.equal(limiter.getInflight(), 1);
@@ -456,7 +463,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("second release does not produce an unhandled rejection when fire-and-forget", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(2) });
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       await a.releaseAndIgnore();
@@ -483,18 +490,17 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
     it("idempotent release does not double-release semaphore permits", async () => {
       const limiter = new Limiter<void>({ limit: new FixedLimit(1) });
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       await a.releaseAndRecordSuccess();
       await a.releaseAndRecordSuccess();
 
       // Only one slot should be available
-      const b = await limiter.acquire({});
+      const b = await acquireOk(limiter, {});
       assert.ok(b);
-      await assert.rejects(
+      await assertUnavailable(
         limiter.acquire({}),
-        isAllotmentUnavailableError,
         "only 1 slot available, not 2 from double-release",
       );
       await b.releaseAndRecordSuccess();
@@ -560,15 +566,16 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         allotmentUnavailableStrategy: {
           onAllotmentUnavailable() {
             retryCalled = true;
-            return Promise.reject(
-              allotmentUnavailableError({ message: "refused" }),
-            );
+            return Promise.resolve({
+              ok: false,
+              error: allotmentUnavailableError({ message: "refused" }),
+            });
           },
           onAllotmentReleased() {},
         },
       });
 
-      const holder = await limiter.acquire({});
+      const holder = await acquireOk(limiter, {});
       assert.ok(holder);
 
       // Abort after the acquire starts but the reservation will fail.
@@ -596,8 +603,8 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         }),
       });
 
-      const h1 = await limiter.acquire({});
-      const h2 = await limiter.acquire({});
+      const h1 = await acquireOk(limiter, {});
+      const h2 = await acquireOk(limiter, {});
       assert.ok(h1);
       assert.ok(h2);
       assert.equal(limiter.getInflight(), 2);
@@ -633,9 +640,9 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       });
 
       const holders = await Promise.all([
-        limiter.acquire({}),
-        limiter.acquire({}),
-        limiter.acquire({}),
+        acquireOk(limiter, {}),
+        acquireOk(limiter, {}),
+        acquireOk(limiter, {}),
       ]);
       for (const h of holders) assert.ok(h);
       assert.equal(limiter.getInflight(), 3);
@@ -663,9 +670,9 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
       // All 3 slots should be available
       const fresh = await Promise.all([
-        limiter.acquire({}),
-        limiter.acquire({}),
-        limiter.acquire({}),
+        acquireOk(limiter, {}),
+        acquireOk(limiter, {}),
+        acquireOk(limiter, {}),
       ]);
       for (const f of fresh) assert.ok(f);
       assert.equal(limiter.getInflight(), 3);
@@ -680,7 +687,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         }),
       });
 
-      const holder = await limiter.acquire({});
+      const holder = await acquireOk(limiter, {});
       assert.ok(holder);
 
       const ac = new AbortController();
@@ -692,7 +699,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         (error) => error === ac.signal.reason,
       );
 
-      const nextPromise = limiter.acquire({});
+      const nextPromise = acquireOk(limiter, {});
       await holder!.releaseAndRecordSuccess();
 
       const next = await Promise.race([
@@ -720,7 +727,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
           resolveRetryStarted?.();
           await returnFromStrategy;
           assert.ok(allotment);
-          return allotment;
+          return { ok: true, value: allotment };
         },
         onAllotmentReleased() {},
       };
@@ -730,7 +737,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         allotmentUnavailableStrategy: rejectionStrategy,
       });
 
-      const holder = await limiter.acquire({});
+      const holder = await acquireOk(limiter, {});
       assert.ok(holder);
 
       const queued = limiter.acquire({ signal: ac.signal });
@@ -748,7 +755,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         "aborted queued acquire should release the acquired allotment",
       );
 
-      const fresh = await limiter.acquire({});
+      const fresh = await acquireOk(limiter, {});
       assert.ok(fresh, "slot should be available after abort cleanup");
       await fresh.releaseAndRecordSuccess();
     });
@@ -841,7 +848,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     it("arms a probe when the limit hits 0 with no inflight, and the probe raises the limit to 1", async () => {
       const { timer, limiter } = makeAimdLimiter({ timeout: 500 });
 
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
       assert.equal(limiter.getLimit(), 1);
 
@@ -877,8 +884,8 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         recoveryProbe: { jitter: 0 },
       });
 
-      const a = await limiter.acquire({});
-      const b = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
+      const b = await acquireOk(limiter, {});
       assert.ok(a);
       assert.ok(b);
 
@@ -893,7 +900,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       await b.releaseAndIgnore();
       assert.equal(limiter.getLimit(), 1);
       assert.equal(timer.pendingCount(), 0, "should not arm: limit > 0");
-      const c = await limiter.acquire({});
+      const c = await acquireOk(limiter, {});
       assert.ok(c);
 
       await c.releaseAndRecordDropped();
@@ -911,7 +918,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     it("rearms with exponentially-growing intervals on consecutive failed probes", async () => {
       const { timer, limiter } = makeAimdLimiter({ timeout: 200 });
 
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
       await a.releaseAndRecordDropped();
 
@@ -921,14 +928,14 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       assert.equal(limiter.getLimit(), 1);
 
       // Probe-induced acquire that drops again -> back to 0, n becomes 1.
-      const b = await limiter.acquire({});
+      const b = await acquireOk(limiter, {});
       assert.ok(b);
       await b.releaseAndRecordDropped();
       assert.equal(limiter.getLimit(), 0);
       assert.equal(timer.pendingMs(), 400, "n=1 → 2 * base");
 
       timer.advance(400);
-      const c = await limiter.acquire({});
+      const c = await acquireOk(limiter, {});
       assert.ok(c);
       await c.releaseAndRecordDropped();
       assert.equal(timer.pendingMs(), 800, "n=2 → 4 * base");
@@ -940,12 +947,12 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       const { timer, limiter } = makeAimdLimiter({ timeout: 200 });
 
       // Run the failure ladder up to n=2.
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
       await a.releaseAndRecordDropped();
       timer.advance(200);
 
-      const b = await limiter.acquire({});
+      const b = await acquireOk(limiter, {});
       assert.ok(b);
       await b.releaseAndRecordDropped();
       assert.equal(timer.pendingMs(), 400);
@@ -956,7 +963,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       timer.advance(400);
       assert.equal(limiter.getLimit(), 1);
 
-      const c = await limiter.acquire({});
+      const c = await acquireOk(limiter, {});
       assert.ok(c);
       await c.releaseAndRecordSuccess();
 
@@ -969,7 +976,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       // Drop until we reach 0 again. AIMD increases on success, so the
       // limit climbed past 1 above and we need multiple drops to hit 0.
       while (limiter.getLimit() > 0) {
-        const d = await limiter.acquire({});
+        const d = await acquireOk(limiter, {});
         assert.ok(d);
         await d.releaseAndRecordDropped();
       }
@@ -984,19 +991,19 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         maxMs: 1_500,
       });
 
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
       await a.releaseAndRecordDropped();
       assert.equal(timer.pendingMs(), 1_000);
 
       timer.advance(1_000);
-      const b = await limiter.acquire({});
+      const b = await acquireOk(limiter, {});
       assert.ok(b);
       await b.releaseAndRecordDropped();
       assert.equal(timer.pendingMs(), 1_500, "capped from 2_000 to 1_500");
 
       timer.advance(1_500);
-      const c = await limiter.acquire({});
+      const c = await acquireOk(limiter, {});
       assert.ok(c);
       await c.releaseAndRecordDropped();
       assert.equal(timer.pendingMs(), 1_500, "stays capped");
@@ -1012,7 +1019,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
           jitter: 0.2,
           maxMs: 10_000,
         });
-        const a = await limiter.acquire({});
+        const a = await acquireOk(limiter, {});
         assert.ok(a);
         await a.releaseAndRecordDropped();
         const ms = timer.pendingMs()!;
@@ -1140,7 +1147,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         recoveryProbe: { jitter: 0 },
       });
 
-      const allotment = await limiter.acquire({});
+      const allotment = await acquireOk(limiter, {});
       assert.ok(allotment);
 
       limiter.dispose();
@@ -1163,7 +1170,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
 
       // Acquire is rejected since limit is 0; nothing inflight, nothing to
       // do. Confirm no probe is armed.
-      await assert.rejects(limiter.acquire({}), isAllotmentUnavailableError);
+      await assertUnavailable(limiter.acquire({}));
       assert.equal(timer.pendingCount(), 0);
 
       limiter.dispose();
@@ -1253,20 +1260,25 @@ describe("Limiter (default SemaphoreStrategy)", () => {
           async onAllotmentUnavailable(_ctx, retry) {
             for (let attempt = 0; attempt < 3; attempt++) {
               const r = await retry(undefined);
-              if (r) return r;
+              if (r) return { ok: true, value: r };
             }
-            throw allotmentUnavailableError({ message: "retries exhausted" });
+            return {
+              ok: false,
+              error: allotmentUnavailableError({
+                message: "retries exhausted",
+              }),
+            };
           },
           onAllotmentReleased() {},
         },
       });
 
       // Hold the only slot so all retries fail.
-      const holder = await limiter.acquire({});
+      const holder = await acquireOk(limiter, {});
       assert.ok(holder);
 
       // Issue an acquire that will retry 3 times and ultimately fail.
-      await assert.rejects(limiter.acquire({}), isAllotmentUnavailableError);
+      await assertUnavailable(limiter.acquire({}));
 
       const failed = events.filter(
         (e) => e.id === MetricIds.ACQUIRE_ATTEMPT_NAME && e.status === "failed",
@@ -1294,23 +1306,23 @@ describe("Limiter (default SemaphoreStrategy)", () => {
             // First retry will fail (slot still held). After we release the
             // holder, the second retry succeeds.
             const first = await retry(undefined);
-            if (first) return first;
+            if (first) return { ok: true, value: first };
             await releaseHolder();
             const second = await retry(undefined);
             assert.ok(second);
-            return second;
+            return { ok: true, value: second };
           },
           onAllotmentReleased() {},
         },
       });
 
-      const holder = await limiter.acquire({});
+      const holder = await acquireOk(limiter, {});
       assert.ok(holder);
       releaseHolder = async () => {
         await holder.releaseAndRecordSuccess();
       };
 
-      const result = await limiter.acquire({});
+      const result = await acquireOk(limiter, {});
       assert.ok(result, "second retry should succeed after holder released");
 
       const failed = events.filter(
@@ -1341,7 +1353,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         metricRegistry: makeRecordingMetricRegistry(events),
       });
 
-      const allotment = await limiter.acquire({ context: "vip" });
+      const allotment = await acquireOk(limiter, { context: "vip" });
       assert.ok(allotment);
       const bypassed = events.filter(
         (e) =>
@@ -1362,7 +1374,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         metricRegistry: makeRecordingMetricRegistry(events),
       });
 
-      const a = await limiter.acquire({ context: "x" });
+      const a = await acquireOk(limiter, { context: "x" });
       assert.ok(a);
       await a.releaseAndRecordSuccess();
       await a.releaseAndRecordSuccess();
@@ -1418,7 +1430,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         metricRegistry: recording,
       });
 
-      const a = await limiter.acquire({ context: "list-things" });
+      const a = await acquireOk(limiter, { context: "list-things" });
       assert.ok(a);
       await a.releaseAndRecordSuccess();
 
@@ -1463,13 +1475,13 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         metricRegistry: throwingRegistry,
       });
 
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
 
       await a.releaseAndRecordSuccess();
       throwOnSuccess = false;
 
-      const next = await limiter.acquire({});
+      const next = await acquireOk(limiter, {});
       assert.ok(
         next,
         "permit should be returned to the strategy even if a metric throws",
@@ -1503,14 +1515,17 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         metricRegistry: throwingRegistry,
         allotmentUnavailableStrategy: {
           onAllotmentUnavailable: () =>
-            Promise.reject(allotmentUnavailableError({ message: "refused" })),
+            Promise.resolve({
+              ok: false,
+              error: allotmentUnavailableError({ message: "refused" }),
+            }),
           onAllotmentReleased() {
             releasedNotifications++;
           },
         },
       });
 
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
       await a.releaseAndRecordSuccess();
       throwOnSuccess = false;
@@ -1553,7 +1568,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       await assert.rejects(() => limiter.acquire({}), /monotonic clock failed/);
       armed = false;
 
-      const next = await limiter.acquire({});
+      const next = await acquireOk(limiter, {});
       assert.ok(
         next,
         "permit must be returned to the strategy when createAllotment throws",
@@ -1581,7 +1596,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         /bad context/,
       );
 
-      const next = await limiter.acquire({ context: "ok" });
+      const next = await acquireOk(limiter, { context: "ok" });
       assert.ok(next);
       await next.releaseAndRecordSuccess();
     });
@@ -1612,7 +1627,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       });
 
       throwOnAcquireSucceed = true;
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(
         a,
         "acquire() must return the allotment even when acquireSucceededCounter throws",
@@ -1621,7 +1636,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       await a.releaseAndRecordSuccess();
 
       // Permit was properly returned, so the next acquire should succeed.
-      const next = await limiter.acquire({});
+      const next = await acquireOk(limiter, {});
       assert.ok(
         next,
         "permit must not be leaked when acquireSucceededCounter throws",
@@ -1651,7 +1666,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       });
 
       throwOnSample = true;
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(
         a,
         "acquire() must return the allotment even when distribution.addSample throws",
@@ -1659,7 +1674,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       throwOnSample = false;
       await a.releaseAndRecordSuccess();
 
-      const next = await limiter.acquire({});
+      const next = await acquireOk(limiter, {});
       assert.ok(
         next,
         "permit must not be leaked when acquireTimeOnSuccessDistribution throws",
@@ -1709,7 +1724,10 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         },
         allotmentUnavailableStrategy: {
           onAllotmentUnavailable: () =>
-            Promise.reject(allotmentUnavailableError({ message: "refused" })),
+            Promise.resolve({
+              ok: false,
+              error: allotmentUnavailableError({ message: "refused" }),
+            }),
           onAllotmentReleased() {},
           onLimitChanged() {
             rejectionStrategyNotified = true;
@@ -1786,7 +1804,7 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         },
       });
 
-      const a = await limiter.acquire({});
+      const a = await acquireOk(limiter, {});
       assert.ok(a);
       // Should not throw or reject — the release path's try/catch around
       // `addSample` keeps liveness even when the subscribe callback throws.
@@ -1824,13 +1842,13 @@ describe("Limiter (default SemaphoreStrategy)", () => {
             resolveRetryStarted?.();
             await returnFromStrategy;
             assert.ok(allotment);
-            return allotment;
+            return { ok: true, value: allotment };
           },
           onAllotmentReleased() {},
         },
       });
 
-      const holder = await limiter.acquire({});
+      const holder = await acquireOk(limiter, {});
       assert.ok(holder);
 
       const queued = limiter.acquire({ signal: ac.signal });
@@ -1969,7 +1987,7 @@ describe("Limiter stall detection", () => {
     });
 
     t.advance(100);
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await acquireOk(limiter, { context: "x" });
     // The loop stalls for 300ms; the response is released in the burst
     // right after, while the stall log's late tick has opened a stall.
     t.freeze(300);
@@ -1993,7 +2011,7 @@ describe("Limiter stall detection", () => {
     });
 
     t.advance(95);
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await acquireOk(limiter, { context: "x" });
     t.advance(5); // a tick at 100: the loop was responsive after the acquire
     t.freeze(300);
     t.advance(50); // the stall closes at the first on-time tick
@@ -2018,7 +2036,7 @@ describe("Limiter stall detection", () => {
     t.freeze(150);
     // Acquired while the loop is (as the log will find out) stalled: its
     // write may not have gone out until the stall ended.
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await acquireOk(limiter, { context: "x" });
     t.freeze(150);
     t.advance(100);
     await allotment.releaseAndRecordSuccess();
@@ -2038,7 +2056,7 @@ describe("Limiter stall detection", () => {
     });
 
     t.advance(100);
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await acquireOk(limiter, { context: "x" });
     t.freeze(300);
     t.advance(0);
     await allotment.releaseAndRecordDropped();
@@ -2058,7 +2076,7 @@ describe("Limiter stall detection", () => {
     });
 
     assert.equal(t.pending(), 0, "no stall-log timer");
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await acquireOk(limiter, { context: "x" });
     t.freeze(300);
     await allotment.releaseAndRecordSuccess();
     assert.equal(samples.length, 1);

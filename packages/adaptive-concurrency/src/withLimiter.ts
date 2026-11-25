@@ -1,7 +1,6 @@
 import type { IsEqual } from "type-fest";
 import type { Satisfies } from "type-party";
 import type { Limiter } from "./Limiter.js";
-import { isAllotmentUnavailableError } from "./errors.js";
 import {
   isAdaptiveDropError,
   isRunResult,
@@ -11,7 +10,7 @@ import {
   type RunResult,
   type RunSuccess,
 } from "./RunResult.js";
-import type { AcquireOptions, LimitAllotment } from "./types/Strategy.js";
+import type { AcquireOptions, Result } from "./types/Strategy.js";
 
 export type RunCallbackArgs<ContextT> = {
   context: ContextT | undefined;
@@ -28,33 +27,22 @@ type FunctionToLimit<ContextT, T> = (
   args: RunCallbackArgs<ContextT>,
 ) => T | ReturnableRunResult<T> | Promise<T | ReturnableRunResult<T>>;
 
-/**
- * What a {@link CallWithLimiter} resolves with. `ok: false` means that the
- * limiter gave no allotment, so `fn` never ran. `error` is the
- * `allotmentUnavailableError` that `Limiter.acquire` rejected with. It is a
- * result, not a rejection, because an unavailable allotment is an expected
- * outcome under load, and the caller must decide what to do with it.
- */
-export type LimitedCallResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: Error };
-
 export type CallWithLimiter<ContextT> = {
-  <T>(fn: FunctionToLimit<ContextT, T>): Promise<LimitedCallResult<T>>;
+  <T>(fn: FunctionToLimit<ContextT, T>): Promise<Result<T>>;
 
   <T>(
     options: AcquireOptions<ContextT>,
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<LimitedCallResult<T>>;
+  ): Promise<Result<T>>;
 };
 
 /**
  * Creates a helper that runs callbacks under acquired limiter allotments.
  *
- * - If {@link Limiter.acquire} rejects with an `allotmentUnavailableError`,
- *   resolves with `{ ok: false, error }` without invoking `fn`. Any other
- *   rejection of `acquire`, such as the signal's reason after an abort,
- *   rejects the returned promise.
+ * - If {@link Limiter.acquire} gives no allotment, resolves with its
+ *   `{ ok: false, error }` without invoking `fn`. `error` is an
+ *   `allotmentUnavailableError`. If `acquire` rejects, for example with the
+ *   signal's reason after an abort, the returned promise rejects too.
  * - Otherwise resolves with `{ ok: true, value }`, where `value` is the
  *   value described below.
  * - If callback returns a {@link RunResult} `success` / `ignore`, returns the
@@ -73,15 +61,15 @@ export function withLimiter<ContextT>(
 ): CallWithLimiter<ContextT> {
   async function callWithLimiter<T>(
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<LimitedCallResult<T>>;
+  ): Promise<Result<T>>;
   async function callWithLimiter<T>(
     options: AcquireOptions<ContextT>,
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<LimitedCallResult<T>>;
+  ): Promise<Result<T>>;
   async function callWithLimiter<T>(
     optionsOrFn: AcquireOptions<ContextT> | FunctionToLimit<ContextT, T>,
     maybeFn?: FunctionToLimit<ContextT, T>,
-  ): Promise<LimitedCallResult<T>> {
+  ): Promise<Result<T>> {
     const [options, fn] =
       typeof optionsOrFn === "function"
         ? [undefined, optionsOrFn]
@@ -91,15 +79,11 @@ export function withLimiter<ContextT>(
       throw new Error("No function provided");
     }
 
-    let allotment: LimitAllotment;
-    try {
-      allotment = await limiter.acquire(options);
-    } catch (error) {
-      if (isAllotmentUnavailableError(error)) {
-        return { ok: false, error: error as Error };
-      }
-      throw error;
+    const acquired = await limiter.acquire(options);
+    if (!acquired.ok) {
+      return acquired;
     }
+    const allotment = acquired.value;
 
     try {
       const allotmentOutcome = await Promise.resolve()
@@ -199,7 +183,7 @@ export function withLimiter<ContextT>(
 export function makeLimitedFunction<ContextT, T>(
   limiter: Limiter<ContextT>,
   fn: FunctionToLimit<ContextT, T>,
-): (opts?: AcquireOptions<ContextT>) => Promise<LimitedCallResult<T>> {
+): (opts?: AcquireOptions<ContextT>) => Promise<Result<T>> {
   const callWithLimiter = withLimiter(limiter);
   return (options?: AcquireOptions<ContextT>) =>
     options ? callWithLimiter(options, fn) : callWithLimiter(fn);

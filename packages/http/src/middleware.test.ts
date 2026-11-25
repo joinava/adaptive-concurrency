@@ -11,7 +11,7 @@ import {
   Limiter,
 } from "adaptive-concurrency";
 import type { HttpRequest, HttpResponse } from "./middleware.js";
-import type { LimitAllotment } from "adaptive-concurrency";
+import type { AcquireOptions, AcquireResult, LimitAllotment } from "adaptive-concurrency";
 
 function makeReq(overrides: Partial<HttpRequest> = {}): HttpRequest {
   return {
@@ -96,7 +96,7 @@ async function startServer(
 
 function makeMockLimiter(allotment: LimitAllotment): Limiter<HttpRequest> {
   return {
-    acquire: async () => allotment,
+    acquire: async () => ({ ok: true, value: allotment }),
   } as unknown as Limiter<HttpRequest>;
 }
 
@@ -120,7 +120,7 @@ describe("concurrencyLimitMiddleware", () => {
 
     // Consume the single slot (don't call next to simulate long-running)
     // Instead, acquire directly to hold the slot
-    const listener = await limiter.acquire({ context: makeReq() });
+    const listener = await acquireOk(limiter, { context: makeReq() });
     assert.ok(listener);
 
     // Second request through middleware should be rejected
@@ -143,7 +143,7 @@ describe("concurrencyLimitMiddleware", () => {
     });
 
     // Consume the slot
-    await limiter.acquire({ context: makeReq() });
+    await acquireOk(limiter, { context: makeReq() });
 
     const res = makeRes();
     await mw(makeReq(), res, () => {});
@@ -447,10 +447,10 @@ describe("HttpLimiterBuilder", () => {
       .build();
 
     for (let i = 0; i < 5; i++) {
-      const l = await limiter.acquire({ context: makeReq() });
+      const l = await acquireOk(limiter, { context: makeReq() });
       assert.ok(l, `Should acquire ${i}`);
     }
-    await assert.rejects(limiter.acquire({ context: makeReq() }), isAllotmentUnavailableError);
+    await assertUnavailable(limiter.acquire({ context: makeReq() }));
   });
 
   it("should partition by header", async () => {
@@ -462,10 +462,10 @@ describe("HttpLimiterBuilder", () => {
       .build();
 
     // Should be able to acquire for both groups
-    const l1 = await limiter.acquire({
+    const l1 = await acquireOk(limiter, {
       context: makeReq({ headers: { "x-group": "live" } }),
     });
-    const l2 = await limiter.acquire({
+    const l2 = await acquireOk(limiter, {
       context: makeReq({ headers: { "x-group": "batch" } }),
     });
     assert.ok(l1);
@@ -479,12 +479,12 @@ describe("HttpLimiterBuilder", () => {
       .build();
 
     // Exhaust limit
-    const l1 = await limiter.acquire({ context: makeReq() });
+    const l1 = await acquireOk(limiter, { context: makeReq() });
     assert.ok(l1);
-    await assert.rejects(limiter.acquire({ context: makeReq() }), isAllotmentUnavailableError);
+    await assertUnavailable(limiter.acquire({ context: makeReq() }));
 
     // Bypass should work
-    const bypass = await limiter.acquire({
+    const bypass = await acquireOk(limiter, {
       context: makeReq({ headers: { "x-bypass": "true" } }),
     });
     assert.ok(bypass, "Should bypass");
@@ -496,12 +496,27 @@ describe("HttpLimiterBuilder", () => {
       .bypassLimitByMethod("OPTIONS")
       .build();
 
-    await limiter.acquire({ context: makeReq() });
-    await assert.rejects(limiter.acquire({ context: makeReq() }), isAllotmentUnavailableError);
+    await acquireOk(limiter, { context: makeReq() });
+    await assertUnavailable(limiter.acquire({ context: makeReq() }));
 
-    const bypass = await limiter.acquire({
+    const bypass = await acquireOk(limiter, {
       context: makeReq({ method: "OPTIONS" }),
     });
     assert.ok(bypass, "OPTIONS should bypass");
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

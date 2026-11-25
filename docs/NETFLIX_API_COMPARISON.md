@@ -104,7 +104,7 @@ Semantics are equivalent: exactly one completion method should be called.
 | Java                                   | TypeScript                                                       |
 | -------------------------------------- | ---------------------------------------------------------------- |
 | functional interface                   | concrete class                                                   |
-| `acquire(context): Optional<Listener>` | `acquire(options?): Promise<LimitAllotment>` (rejects with `allotmentUnavailableError` when empty) |
+| `acquire(context): Optional<Listener>` | `acquire(options?): Promise<Result<LimitAllotment>>` (`{ ok: false, error }` when empty) |
 | rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                        |
 | context passed positionally            | options object (`{ context, signal? }`)                          |
 
@@ -206,7 +206,7 @@ Additional details:
 - `LinkedWaiterQueue` now acts as a priority queue; `enqueueOptions.priority` can be used to prioritize queued waiters (higher priority is served first).
 - Both strategies react to limit increases (`onLimitChanged`) by scheduling a backlog drain, so queued callers can be served without waiting for another release event.
 - Enqueuing a waiter also schedules a coalesced opportunistic drain. This prevents lost wakeups when a release happens between a failed acquire attempt and the caller being fully enqueued. Drains are serialized (`drainInProgress`) and retry only the current queue head; a release that happens during an in-flight retry is remembered and causes the loop to retry rather than losing capacity.
-- `DelayedRejectStrategy`: awaits a delay then rejects with an `allotmentUnavailableError` (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
+- `DelayedRejectStrategy`: awaits a delay then gives no allotment (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
 - `DelayedThenBlockingRejection`: runs delayed rejection first, then retries once, and if still unavailable delegates to configured blocking strategy.
 
 ### Java-style builder wrappers -> TS factory helpers

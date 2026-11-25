@@ -16,28 +16,33 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
 
 ### Breaking
 
-- `Limiter.acquire()` no longer resolves with `undefined` when the limiter
-  gives no allotment. `AcquireResult` is now `Promise<LimitAllotment>`, and
-  the promise rejects:
-  - with an `allotmentUnavailableError` when no allotment is available, the
-    backlog is full, or the request times out in the backlog. Test for it
-    with `isAllotmentUnavailableError`.
-  - with the signal's `reason` when the caller's signal aborts, including a
-    signal that had aborted before the call.
-- `AllotmentUnavailableStrategy.onAllotmentUnavailable` must resolve with an
-  allotment, or reject. To give up, it rejects with an
-  `allotmentUnavailableError`; on abort, it rejects with the signal's
-  `reason`. Its `retry` callback is typed `RetryAcquire<ContextT>` and still
-  resolves with `undefined` while the acquire strategy refuses. A strategy
-  that resolves with `undefined` makes `acquire()` reject with a `TypeError`.
-- `withLimiter` and `makeLimitedFunction` resolve with a `LimitedCallResult`:
-  `{ ok: true, value }`, or `{ ok: false, error }` when the limiter gave no
-  allotment and `fn` did not run. Any other rejection of `acquire()`, such as
-  an abort, rejects. `QuotaNotAvailable` is removed.
+- `Limiter.acquire()` resolves with a `Result<LimitAllotment>`, not with a
+  `LimitAllotment | undefined`. `AcquireResult` is now
+  `Promise<Result<LimitAllotment>>`, where
+  `Result<T> = { ok: true, value: T } | { ok: false, error: Error }`.
+  - `{ ok: true, value }` holds the allotment.
+  - `{ ok: false, error }` means no allotment was available, the backlog was
+    full, or the request timed out in the backlog. `error` is an
+    `allotmentUnavailableError`.
+  - The promise rejects with the signal's `reason` when the caller's signal
+    aborts, including a signal that had aborted before the call. It also
+    rejects when a strategy, the clock, or another callback throws.
+- `AllotmentUnavailableStrategy.onAllotmentUnavailable` returns the same
+  `AcquireResult`. To give up, it resolves with `{ ok: false, error }`, where
+  `error` is an `allotmentUnavailableError` that it makes. On abort, it
+  rejects with the signal's `reason`. Its `retry` callback is typed
+  `RetryAcquire<ContextT>` and still resolves with `undefined` while the
+  acquire strategy refuses. A strategy that resolves with anything that is
+  not a result makes `acquire()` reject with a `TypeError`.
+- `withLimiter` and `makeLimitedFunction` resolve with a `Result<T>`:
+  `{ ok: true, value }`, or `acquire()`'s `{ ok: false, error }` when the
+  limiter gave no allotment and `fn` did not run. If `acquire()` rejects, for
+  example after an abort, they reject too. `QuotaNotAvailable` is removed.
 - `@zingage/errors` (^1.1.0) is a new peer dependency.
 
 ### Added
 
+- `Result<T, E = Error>`.
 - `allotmentUnavailableError`, `isAllotmentUnavailableError`, and
   `adaptiveConcurrencyErrorVocabulary`. The error type
   `ALLOTMENT_UNAVAILABLE` is under the `SERVICE_UNAVAILABLE` root: safe to

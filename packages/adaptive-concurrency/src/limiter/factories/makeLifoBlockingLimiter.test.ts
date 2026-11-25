@@ -3,13 +3,18 @@ import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makeLifoBlockingLimiter } from "./makeLifoBlockingLimiter.js";
 import { isAllotmentUnavailableError } from "../../errors.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "../../types/Strategy.js";
 
 describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () => {
   it("acquires immediately when under limit", async () => {
     const limiter = makeLifoBlockingLimiter<string>({
       limiter: { limit: new FixedLimit(2) },
     });
-    const allotment = await limiter.acquire({ context: "a" });
+    const allotment = await acquireOk(limiter, { context: "a" });
     assert.ok(allotment);
     await allotment!.releaseAndRecordSuccess();
   });
@@ -20,20 +25,20 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({ context: "inflight" });
+    const first = await acquireOk(limiter, { context: "inflight" });
     assert.ok(first);
 
     const order: string[] = [];
     const w1 = limiter.acquire({ context: "oldest" }).then(async (a) => {
-      if (a) {
+      if (a.ok) {
         order.push("oldest");
-        await a.releaseAndRecordSuccess();
+        await a.value.releaseAndRecordSuccess();
       }
     });
     const w2 = limiter.acquire({ context: "newest" }).then(async (a) => {
-      if (a) {
+      if (a.ok) {
         order.push("newest");
-        await a.releaseAndRecordSuccess();
+        await a.value.releaseAndRecordSuccess();
       }
     });
 
@@ -43,42 +48,36 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     assert.deepEqual(order, ["newest", "oldest"]);
   });
 
-  it("rejects with an unavailable allotment when backlog timeout is reached", async () => {
+  it("resolves { ok: false } when backlog timeout is reached", async () => {
     const limiter = makeLifoBlockingLimiter<string>({
       backlogTimeout: 50,
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const start = performance.now();
-    await assert.rejects(
-      limiter.acquire({ context: "b" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "b" }));
     const elapsed = performance.now() - start;
     assert.ok(elapsed >= 35);
   });
 
-  it("rejects with an unavailable allotment when backlog size is exceeded", async () => {
+  it("resolves { ok: false } when backlog size is exceeded", async () => {
     const limiter = makeLifoBlockingLimiter<string>({
       backlogSize: 1,
       backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const inBacklog = limiter.acquire({ context: "b" });
-    await assert.rejects(
-      limiter.acquire({ context: "c" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "c" }));
 
     await first!.releaseAndRecordSuccess();
-    assert.ok(await inBacklog);
+    assert.ok((await inBacklog).ok);
   });
 
   it("rejects with the abort reason when aborted while waiting", async () => {
@@ -87,7 +86,7 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const ac = new AbortController();
@@ -111,7 +110,7 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
       backlogTimeout: () => 60 * 60 * 1000 + 1,
       limiter: { limit: new FixedLimit(1) },
     });
-    const first = await limiter.acquire({ context: "inflight" });
+    const first = await acquireOk(limiter, { context: "inflight" });
     assert.ok(first);
 
     await assert.rejects(
@@ -120,3 +119,18 @@ describe("makeLifoBlockingLimiter (Netflix LifoBlockingLimiter semantics)", () =
     );
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

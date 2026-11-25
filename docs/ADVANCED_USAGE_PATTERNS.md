@@ -75,22 +75,21 @@ Notes:
 - Returning a non-`RunResult` value is shorthand for `return success(value)`.
 - Throwing a non-`RunResult` error is shorthand for `throw ignore(error)`.
 - Returning `dropped(error)` is invalid; use `throw dropped(error)` for drop semantics.
-- If `acquire` rejects with an `allotmentUnavailableError`, `callWithLimiter` resolves with `{ ok: false, error }` and does not call `fn`. Any other rejection of `acquire`, such as the signal's reason after an abort, rejects `callWithLimiter`.
+- If `acquire` gives no allotment, `callWithLimiter` resolves with its `{ ok: false, error }` and does not call `fn`. `error` is an `allotmentUnavailableError`. If `acquire` rejects, for example with the signal's reason after an abort, `callWithLimiter` rejects too.
 
 ## Direct `acquire` + `LimitAllotment`
 
 `acquire` is a lower-level API that's not as safe, as you MUST be sure to call `releaseAndRecordSuccess()`, `releaseAndRecordDropped()` or `releaseAndIgnore()` when the operation is complete.
 
 ```typescript
-let allotment: LimitAllotment;
-try {
-  allotment = await limiter.acquire({ context: "tenant-a" });
-} catch (error) {
-  if (!isAllotmentUnavailableError(error)) throw error;
-  // No allotment right now
+const acquired = await limiter.acquire({ context: "tenant-a" });
+if (!acquired.ok) {
+  // No allotment right now. `acquired.error` is the
+  // `allotmentUnavailableError`.
   return;
 }
 
+const allotment = acquired.value;
 try {
   await doWork();
   await allotment.releaseAndRecordSuccess();
@@ -101,6 +100,6 @@ try {
 
 To use it, pass `AcquireOptions`: `{ context }` when the limiter is keyed by context, `{ signal }` for `AbortSignal`, or omit/`{}` for a void context.
 
-`acquire` returns `Promise<LimitAllotment>` and should be awaited directly. It rejects with an `allotmentUnavailableError` when the limiter gives no allotment, and with the signal's `reason` when the signal aborts first.
+`acquire` returns `Promise<Result<LimitAllotment>>` and should be awaited directly. It resolves with `{ ok: false, error }` when the limiter gives no allotment, where `error` is an `allotmentUnavailableError`. It rejects with the signal's `reason` when the signal aborts first.
 
 Use `acquire` + `LimitAllotment` when you need a separate acquire and release (framework hooks, streaming lifetimes, handoff to another owner). Use `withLimiter(limiter)` or `makeLimitedFunction(limiter, fn)` when a single async scope is enough.

@@ -11,6 +11,7 @@ import {
   success,
 } from "./RunResult.js";
 import { makeLimitedFunction, withLimiter } from "./withLimiter.js";
+import type { AcquireOptions, AcquireResult, LimitAllotment } from "./types/Strategy.js";
 
 describe("withLimiter", () => {
   it("returns value on success and releases slot", async () => {
@@ -32,7 +33,7 @@ describe("withLimiter", () => {
     assert.deepEqual(v, { ok: true, value: 42 });
 
     // Verify slot was released as success.
-    const again = await limiter.acquire({ context: "a" });
+    const again = await acquireOk(limiter, { context: "a" });
     assert.ok(again);
   });
 
@@ -44,14 +45,14 @@ describe("withLimiter", () => {
     assert.deepEqual(v, { ok: true, value: malformed });
 
     // Verify slot was released as success.
-    const again = await limiter.acquire({ context: "a" });
+    const again = await acquireOk(limiter, { context: "a" });
     assert.ok(again);
   });
 
   it("resolves { ok: false } when no allotment and does not run fn", async () => {
     const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
     const limited = withLimiter(limiter);
-    await limiter.acquire({ context: "a" });
+    await acquireOk(limiter, { context: "a" });
 
     let ran = false;
     const out = await limited({ context: "a" }, async () => {
@@ -88,7 +89,7 @@ describe("withLimiter", () => {
     const v = await limited({ context: "a" }, () => ignore(7));
     assert.deepEqual(v, { ok: true, value: 7 });
 
-    const next = await limiter.acquire({ context: "a" });
+    const next = await acquireOk(limiter, { context: "a" });
     assert.ok(next);
   });
 
@@ -104,7 +105,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === err,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("rejects misuse when callback returns dropped result", async () => {
@@ -124,7 +125,7 @@ describe("withLimiter", () => {
         e.message.includes('"kind":"dropped"'),
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("rejects misuse when callback throws success result and releases slot", async () => {
@@ -145,7 +146,7 @@ describe("withLimiter", () => {
         e.message.includes("do not throw success(value)"),
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("reports ignore and rethrows on unknown callback throw", async () => {
@@ -160,7 +161,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === boom,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("reports ignore and unwraps thrown ignore result", async () => {
@@ -175,7 +176,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === boom,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("reports ignore and releases on synchronous callback throw", async () => {
@@ -190,7 +191,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === boom,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("reports drop and rethrows on AdaptiveTimeoutError throw", async () => {
@@ -205,7 +206,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === timeout,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("reports drop and rethrows on AdaptiveRejectionError throw", async () => {
@@ -220,7 +221,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === rejection,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("treats legacy adaptive rejection code throws as drops", async () => {
@@ -235,7 +236,7 @@ describe("withLimiter", () => {
       (e: unknown) => e === rejection,
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("passes acquire options (context)", async () => {
@@ -245,7 +246,7 @@ describe("withLimiter", () => {
     });
     const limited = withLimiter(limiter);
 
-    await limiter.acquire({ context: "norm" });
+    await acquireOk(limiter, { context: "norm" });
     const q = await limited({ context: "norm" }, () => success(1));
     assert.equal(q.ok, false);
 
@@ -293,7 +294,7 @@ describe("makeLimitedFunction", () => {
 
   it("resolves { ok: false } and does not run callback when no allotment is available", async () => {
     const limiter = new Limiter<string>({ limit: new FixedLimit(1) });
-    await limiter.acquire({ context: "a" });
+    await acquireOk(limiter, { context: "a" });
 
     let ran = false;
     const limited = makeLimitedFunction(limiter, () => {
@@ -327,7 +328,7 @@ describe("makeLimitedFunction", () => {
     });
 
     await assert.rejects(limited({ context: "a" }), (e: unknown) => e === err);
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("records ignore and unwraps thrown ignore result", async () => {
@@ -338,7 +339,7 @@ describe("makeLimitedFunction", () => {
     });
 
     await assert.rejects(limited({ context: "a" }), (e: unknown) => e === err);
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("rejects misuse when bound callback returns dropped result and releases slot", async () => {
@@ -356,6 +357,21 @@ describe("makeLimitedFunction", () => {
         e.message.includes('"kind":"dropped"'),
     );
 
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

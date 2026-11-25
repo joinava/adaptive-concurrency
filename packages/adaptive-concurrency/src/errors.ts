@@ -32,8 +32,10 @@ export const adaptiveConcurrencyErrorVocabulary = defineErrorVocabulary({
 });
 
 /**
- * Makes the error for a request that got no allotment. An
- * {@link AllotmentUnavailableStrategy} rejects with it when it gives up.
+ * Makes the error for a request that got no allotment. It is the `error` of
+ * the `{ ok: false, error }` result of `Limiter.acquire`. An
+ * {@link AllotmentUnavailableStrategy} that gives up makes it, and can state
+ * a `retryAfter` or a different `load`.
  */
 export const allotmentUnavailableError =
   adaptiveConcurrencyErrorVocabulary.types.ALLOTMENT_UNAVAILABLE;

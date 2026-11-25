@@ -1,28 +1,28 @@
 import { allotmentUnavailableError } from "../../errors.js";
 import type {
+  AcquireResult,
   AllotmentUnavailableStrategy,
-  LimitAllotment,
   RetryAcquire,
 } from "../../types/Strategy.js";
 
 export interface DelayedRejectStrategyOptions<ContextT> {
   /**
-   * Milliseconds to wait before rejecting with an `allotmentUnavailableError`.
-   * Return 0 to reject immediately. With `PartitionedStrategy`, usually mirror `partitionResolver`
+   * Milliseconds to wait before resolving with no allotment. Return 0 to
+   * refuse immediately. With `PartitionedStrategy`, usually mirror `partitionResolver`
    * here and look up delay from your own per-partition config.
    */
   delayMsForContext: (context: ContextT) => number;
 
   /**
    * Maximum number of acquire attempts that may be waiting on a delay at once.
-   * When exceeded, new rejections skip the delay (immediate rejection).
+   * When exceeded, new refusals skip the delay.
    */
   maxConcurrentDelays?: number | undefined;
 }
 
 /**
  * When the acquire strategy rejects, waits up to `delayMsForContext(context)`,
- * then still rejects with an `allotmentUnavailableError`. This adds a form of backpressure. Does not
+ * then still resolves with no allotment (`{ ok: false, error }`). This adds a form of backpressure. Does not
  * call `retry` — unlike {@link BlockingBacklogRejection}, this is "delay then
  * reject," not "wait for capacity." Compose with `PartitionedStrategy` via
  * `Limiter.rejectionStrategy`; partition delays are not fields on `PartitionConfig`.
@@ -44,20 +44,22 @@ export class DelayedRejectStrategy<
   }
 
   /**
-   * Waits for the context's delay, then rejects with an
-   * `allotmentUnavailableError`. Rejects with the signal's reason when the
-   * signal aborts.
+   * Waits for the context's delay, then resolves with `{ ok: false, error }`.
+   * Rejects with the signal's reason when the signal aborts.
    */
   async onAllotmentUnavailable(
     context: ContextT,
     _retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment> {
+  ): AcquireResult {
     await this.delay(context, signal);
-    signal?.throwIfAborted();
-    throw allotmentUnavailableError({
-      message: "No allotment is available, and the delay before refusal ended",
-    });
+    return {
+      ok: false,
+      error: allotmentUnavailableError({
+        message:
+          "No allotment is available, and the delay before refusal ended",
+      }),
+    };
   }
 
   onAllotmentReleased(): void {

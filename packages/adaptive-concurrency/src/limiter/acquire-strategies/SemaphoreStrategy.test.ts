@@ -4,6 +4,11 @@ import { isAllotmentUnavailableError } from "../../errors.js";
 import { Limiter } from "../../Limiter.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import { SemaphoreStrategy } from "./SemaphoreStrategy.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "../../types/Strategy.js";
 
 describe("SemaphoreStrategy", () => {
   it("should use permits until exhausted", () => {
@@ -52,16 +57,28 @@ describe("SemaphoreStrategy", () => {
     const limiter = new Limiter<string>({ limit });
 
     for (let i = 0; i < 5; i++) {
-      await limiter.acquire({ context: "test" });
+      await acquireOk(limiter, { context: "test" });
     }
-    await assert.rejects(
-      limiter.acquire({ context: "test" }),
-      isAllotmentUnavailableError,
-    );
+    await assertUnavailable(limiter.acquire({ context: "test" }));
 
     limit.setLimit(10);
 
-    const extra = await limiter.acquire({ context: "test" });
+    const extra = await acquireOk(limiter, { context: "test" });
     assert.ok(extra, "Should acquire after limit increase");
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

@@ -48,16 +48,26 @@ export type AcquireOptions<ContextT = void> = {
 };
 
 /**
- * The result of {@link Limiter.acquire}. It resolves with an allotment, or
- * rejects:
- *
- * - with an {@link allotmentUnavailableError} when the limiter gives no
- *   allotment. `isAllotmentUnavailableError` tests for it.
- * - with the signal's `reason` when the caller's signal aborts first.
- * - with any other error that a strategy, the clock, or another callback
- *   throws.
+ * An expected outcome that can fail: `{ ok: true, value }`, or
+ * `{ ok: false, error }`. The package uses it where a failure is a normal
+ * outcome under load, which the caller must handle, not an exception.
  */
-export type AcquireResult = Promise<LimitAllotment>;
+export type Result<T, E = Error> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: E };
+
+/**
+ * The result of {@link Limiter.acquire}, and of an
+ * {@link AllotmentUnavailableStrategy}.
+ *
+ * - It resolves with `{ ok: true, value }`, where `value` is the allotment.
+ * - It resolves with `{ ok: false, error }` when the limiter gives no
+ *   allotment. `error` is an {@link allotmentUnavailableError}.
+ * - It rejects with the signal's `reason` when the caller's signal aborts
+ *   first, and with any error that a strategy, the clock, or another
+ *   callback throws.
+ */
+export type AcquireResult = Promise<Result<LimitAllotment>>;
 
 /**
  * One more attempt to get an allotment, which an
@@ -131,11 +141,12 @@ export type AcquireStrategy<ContextT> = {
  * until a slot is available). Implementations must return an
  * {@link AcquireResult}, which is always a `Promise`.
  *
- * When the strategy gives up, it rejects with an
- * {@link allotmentUnavailableError}. It is the throw site, so it can state
- * what it knows: a `retryAfter` when it knows when capacity returns, or a
- * different `load`. When the caller's signal aborts, it rejects with the
- * signal's `reason`.
+ * When the strategy gets an allotment, it resolves with `{ ok: true, value }`.
+ * When it gives up, it resolves with `{ ok: false, error }`, where `error` is
+ * an {@link allotmentUnavailableError}. The strategy makes the error, so it
+ * can state what it knows: a `retryAfter` when it knows when capacity
+ * returns, or a different `load`. When the caller's signal aborts, it rejects
+ * with the signal's `reason`.
  */
 export type AllotmentUnavailableStrategy<ContextT> = {
   /**

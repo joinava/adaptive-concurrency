@@ -17,6 +17,7 @@ import type {
   AcquireStrategy,
   AllotmentUnavailableStrategy,
   LimitAllotment,
+  Result,
   RetryAcquire,
 } from "./types/Strategy.js";
 
@@ -452,9 +453,9 @@ export class Limiter<
 
   /**
    * Gets an allotment for one operation. See {@link AcquireResult} for how
-   * the promise settles: it rejects with an `allotmentUnavailableError` when
-   * the limiter gives no allotment, and with the signal's `reason` when the
-   * signal aborts first.
+   * the promise settles: it resolves with `{ ok: false, error }` when the
+   * limiter gives no allotment, and rejects with the signal's `reason` when
+   * the signal aborts first.
    */
   async acquire(options?: AcquireOptions<Context>): AcquireResult {
     const signal = options?.signal;
@@ -465,7 +466,7 @@ export class Limiter<
       void fireAndForget(() => {
         this.acquireBypassedCounter.add(1);
       });
-      return this.createBypassedAllotment(ctx);
+      return { ok: true, value: this.createBypassedAllotment(ctx) };
     }
 
     const acquireStart = this.clock();
@@ -474,8 +475,7 @@ export class Limiter<
       return this.keepUnlessAborted(allotment, signal);
     }
 
-    // Called once, when this method rejects because no allotment was
-    // available; not called for each individual acquire attempt that may be
+    // Called once, when this method resolves without an allotment; not called for each individual acquire attempt that may be
     // triggered by the rejection strategy.
     const recordFinalAcquireFailed = () => {
       void fireAndForget(() => {
@@ -487,10 +487,13 @@ export class Limiter<
     const rejectionStrategy = this.rejectionStrategy;
     if (!rejectionStrategy) {
       recordFinalAcquireFailed();
-      throw allotmentUnavailableError({
-        message:
-          "No allotment is available, and the limiter has no strategy to wait for one",
-      });
+      return {
+        ok: false,
+        error: allotmentUnavailableError({
+          message:
+            "No allotment is available, and the limiter has no strategy to wait for one",
+        }),
+      };
     }
 
     // If the signal aborted here, there is nothing to clean up, as we didn't
@@ -505,31 +508,27 @@ export class Limiter<
       return this.tryAcquireCore(retryCtx, acquireStart);
     };
 
-    let result: LimitAllotment | undefined;
-    try {
-      result = await rejectionStrategy.onAllotmentUnavailable(
-        ctx,
-        retry,
-        signal,
-      );
-    } catch (error) {
-      // An abort is not an unavailable allotment, so it records no time.
-      if (!signal?.aborted) {
-        recordFinalAcquireFailed();
-      }
-      throw error;
-    }
+    // A rejection is an abort, or a fault in the strategy. Neither is an
+    // unavailable allotment, so it propagates and records no acquire time.
+    // `| undefined` is for the check below.
+    const result: Result<LimitAllotment> | undefined =
+      await rejectionStrategy.onAllotmentUnavailable(ctx, retry, signal);
 
     // The type rules this out, but a strategy written in JavaScript against
-    // the old contract resolved `undefined` to refuse.
-    if (result === undefined) {
-      recordFinalAcquireFailed();
+    // the old contract resolved `undefined` to refuse, or the allotment
+    // itself to grant.
+    if (result === undefined || !("ok" in result)) {
       throw new TypeError(
-        "AllotmentUnavailableStrategy.onAllotmentUnavailable resolved without an allotment. To refuse, reject with an allotmentUnavailableError.",
+        "AllotmentUnavailableStrategy.onAllotmentUnavailable must resolve with { ok: true, value } or { ok: false, error }.",
       );
     }
 
-    return this.keepUnlessAborted(result, signal);
+    if (!result.ok) {
+      recordFinalAcquireFailed();
+      return result;
+    }
+
+    return this.keepUnlessAborted(result.value, signal);
   }
 
   /**
@@ -540,12 +539,12 @@ export class Limiter<
   private async keepUnlessAborted(
     allotment: LimitAllotment,
     signal: AbortSignal | undefined,
-  ): Promise<LimitAllotment> {
+  ): AcquireResult {
     if (signal?.aborted) {
       await allotment.releaseAndIgnore();
       throw signal.reason;
     }
-    return allotment;
+    return { ok: true, value: allotment };
   }
 
   private async tryAcquireCore(
