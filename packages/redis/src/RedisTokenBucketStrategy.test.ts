@@ -35,7 +35,11 @@ type AcquireResponse = [1, 0] | [0, number];
  */
 type RefundResponse = 0 | 1;
 
-type ScriptedResponse = AcquireResponse | RefundResponse;
+/**
+ * An `Error` in the script makes that one call reject, so a test can simulate
+ * a transient Redis failure between successful calls.
+ */
+type ScriptedResponse = AcquireResponse | RefundResponse | Error;
 
 /**
  * Mock client whose `evalSha` ignores the actual script and returns whatever
@@ -77,7 +81,9 @@ function makeMockClient(options: {
       if (responses.length === 0) {
         throw new Error("Mock client out of scripted responses");
       }
-      return responses.shift();
+      const response = responses.shift();
+      if (response instanceof Error) throw response;
+      return response;
     },
   };
 }
@@ -727,6 +733,58 @@ describe("RedisTokenBucketStrategy", () => {
       // touching Redis at all.
       assert.equal(errors.length, 1);
     });
+
+    // A failed acquire does not say whether the script ran, so the strategy
+    // must not refund. Redis is back for the next call, so a refund would
+    // reach the bucket and add a token it may never have lost.
+    for (const transition of ["commit-throw", "cancel"] as const) {
+      it(`does not refund a fail-open grant on ${transition}`, async () => {
+        const client = makeMockClient({
+          responses: [
+            new Error("ETIMEDOUT"), // tryAcquire fails open
+            1, // a refund, if one were sent, would succeed
+          ],
+        });
+        const bucket = new RedisTokenBucket(client, {
+          keyPrefix: "test",
+          maxTokens: 5,
+          refillIntervalMs: 1000,
+        });
+        const commitError = new Error("commit exploded");
+        const inner = makeInnerStub<string>({
+          reserveResults: [true],
+          ...(transition === "commit-throw"
+            ? { commitThrows: commitError }
+            : {}),
+        });
+        const strategy = new RedisTokenBucketStrategy<string>({
+          bucket,
+          inner: inner.strategy,
+        });
+
+        const reservation = await strategy.tryReserveAllotment(
+          "ctx",
+          fakeState,
+        );
+        assert.ok(reservation, "the bucket fails open, so the inner grants");
+
+        if (transition === "commit-throw") {
+          await assert.rejects(
+            async () => await reservation.commit(),
+            commitError,
+          );
+        } else {
+          await reservation.cancel();
+          assert.deepEqual(inner.cancelCalls, ["ctx"]);
+        }
+
+        assert.equal(
+          client.evalShaCalls.length,
+          1,
+          "only the failed acquire reached Redis; no refund was sent",
+        );
+      });
+    }
   });
 
   describe("integration with SemaphoreStrategy", () => {

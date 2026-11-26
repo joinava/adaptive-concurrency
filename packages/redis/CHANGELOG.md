@@ -17,7 +17,19 @@ Releases before 0.3.0 have no entries; see the git history.
   denial makes `Limiter.acquire()` resolve with `{ ok: false, error }`, where
   `error` is an `allotmentUnavailableError`. It used to resolve with
   `undefined`.
-  This package's own API does not change.
+- `AcquireResult`'s granted variant has a required `debited: boolean`. It is
+  `true` when Redis confirmed that it took a token, and `false` when the
+  bucket failed open on a Redis error. Code that builds an `AcquireResult`
+  must set it.
+
+### Fixed
+
+- `RedisTokenBucketStrategy` refunded a token after a fail-open grant when the
+  inner's `commit()` threw or the reservation was cancelled. A failed acquire
+  does not say whether the script ran, so that refund could add a token the
+  bucket never lost and let one extra request through. The strategy now
+  refunds only a grant with `debited: true`. Skipping the refund loses at
+  most one token, which the next refill restores.
 
 ## [0.3.0] - 2026-09-16
 
