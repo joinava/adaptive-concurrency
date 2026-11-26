@@ -172,9 +172,7 @@ export class RedisTokenBucketStrategy<ContextT> {
 
     // Refund only a token that Redis confirmed it took. A grant that failed
     // open has an unknown debit, and refunding it could add a token.
-    const refundToken = result.debited
-      ? async () => await this.#refundQuietly(key)
-      : async () => {};
+    const { debited } = result;
 
     // Both gates granted. Return a reservation that settles the bucket token
     // and otherwise gets out of the way: the caller owns these transitions, so
@@ -185,11 +183,12 @@ export class RedisTokenBucketStrategy<ContextT> {
           await reservation.commit();
         } catch (error) {
           // The inner is in an indeterminate state per the
-          // AllotmentReservation contract, but the bucket token is purely ours
-          // and refunding is always safe (the bucket is rate-based, not
-          // absolute), so give it back before the error escapes.
+          // AllotmentReservation contract, but a debited bucket token is
+          // purely ours and refunding it is always safe (the bucket is
+          // rate-based, not absolute), so give it back before the error
+          // escapes.
           // `#refundQuietly` never throws, so it cannot shadow `error`.
-          await refundToken();
+          if (debited) await this.#refundQuietly(key);
           throw error;
         }
       },
@@ -201,7 +200,7 @@ export class RedisTokenBucketStrategy<ContextT> {
         try {
           await reservation.cancel();
         } finally {
-          await refundToken();
+          if (debited) await this.#refundQuietly(key);
         }
       },
     );
