@@ -17,11 +17,11 @@ Reference Java repo: [Netflix/concurrency-limits](https://github.com/Netflix/con
 
 ## 1. Repository and integration surface
 
-| Java (Netflix)                                                              | TypeScript (this repo)                                                      |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Java (Netflix)                                                              | TypeScript (this repo)                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | Multi-module Maven project (`concurrency-limits-core`, servlet, gRPC, etc.) | Monorepo with `packages/adaptive-concurrency`, `packages/http`, and `packages/redis` |
-| Framework-specific servlet and gRPC integrations                            | HTTP middleware integration for Node/Express-style frameworks               |
-| Includes servlet filter and gRPC modules                                    | No gRPC package currently                                                   |
+| Framework-specific servlet and gRPC integrations                            | HTTP middleware integration for Node/Express-style frameworks                        |
+| Includes servlet filter and gRPC modules                                    | No gRPC package currently                                                            |
 
 The TypeScript HTTP package is intentionally minimal and framework-agnostic, based on request/response shape rather than servlet APIs. The Redis package is not a Java-port module; it adds a distributed token-bucket gate for cross-process rate limiting.
 
@@ -75,12 +75,12 @@ Because JavaScript is single-threaded, "blocking" means promise-based waiting, n
 
 ### `Limit` -> `AdaptiveLimit`
 
-| Java `Limit`                                  | TypeScript `AdaptiveLimit`                                        |
-| --------------------------------------------- | ----------------------------------------------------------------- |
-| `int getLimit()`                              | `currentLimit` getter                                             |
-| `notifyOnChange(Consumer<Integer>)`           | `subscribe(listener, { signal? }): () => void`                    |
-| `onSample(startNs, rttNs, inflight, didDrop)` | `addSample(startMs, rttMs, inflight, didDrop, operationName?)`    |
-| nanosecond time units                         | fractional milliseconds                                           |
+| Java `Limit`                                  | TypeScript `AdaptiveLimit`                                     |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| `int getLimit()`                              | `currentLimit` getter                                          |
+| `notifyOnChange(Consumer<Integer>)`           | `subscribe(listener, { signal? }): () => void`                 |
+| `onSample(startNs, rttNs, inflight, didDrop)` | `addSample(startMs, rttMs, inflight, didDrop, operationName?)` |
+| nanosecond time units                         | fractional milliseconds                                        |
 
 The TypeScript `addSample` accepts an optional fifth parameter, `operationName?: string`, used by group-aware limits (e.g. `GroupAwareLimit`) to distinguish heterogeneous workloads. All existing limit implementations accept and ignore the parameter.
 
@@ -101,12 +101,12 @@ Semantics are equivalent: exactly one completion method should be called.
 
 ### `Limiter` interface -> `Limiter` class
 
-| Java                                   | TypeScript                                                       |
-| -------------------------------------- | ---------------------------------------------------------------- |
-| functional interface                   | concrete class                                                   |
+| Java                                   | TypeScript                                                                               |
+| -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| functional interface                   | concrete class                                                                           |
 | `acquire(context): Optional<Listener>` | `acquire(options?): Promise<Result<LimitAllotment>>` (`{ ok: false, error }` when empty) |
-| rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                        |
-| context passed positionally            | options object (`{ context, signal? }`)                          |
+| rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                                                |
+| context passed positionally            | options object (`{ context, signal? }`)                                                  |
 
 TypeScript `AcquireOptions` adds `signal?: AbortSignal`.
 
@@ -145,11 +145,11 @@ No direct Java equivalent.
 
 ## 5. Limiter implementation mapping
 
-| Java                         | TypeScript                                                       |
-| ---------------------------- | ---------------------------------------------------------------- |
-| `SimpleLimiter`              | `Limiter` with default `SemaphoreStrategy`                       |
-| `AbstractPartitionedLimiter` | `PartitionedStrategy` plugged into `Limiter.acquireStrategy`     |
-| `BlockingLimiter`            | `BlockingBacklogRejection` with `enqueueOptions: { direction: "back" }` + `new LinkedWaiterQueue()` in `Limiter.allotmentUnavailableStrategy` |
+| Java                         | TypeScript                                                                                                                                     |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SimpleLimiter`              | `Limiter` with default `SemaphoreStrategy`                                                                                                     |
+| `AbstractPartitionedLimiter` | `PartitionedStrategy` plugged into `Limiter.acquireStrategy`                                                                                   |
+| `BlockingLimiter`            | `BlockingBacklogRejection` with `enqueueOptions: { direction: "back" }` + `new LinkedWaiterQueue()` in `Limiter.allotmentUnavailableStrategy`  |
 | `LifoBlockingLimiter`        | `BlockingBacklogRejection` with `enqueueOptions: { direction: "front" }` + `new LinkedWaiterQueue()` in `Limiter.allotmentUnavailableStrategy` |
 
 Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`, which currently returns `new GradientLimit()`, **not a `VegasLimit`**, which is what the Java code used.
@@ -160,6 +160,7 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 - `partitionResolver` is a single function; ordered fallback is left to the caller.
 - `PartitionedStrategy` accepts a second type parameter `PartitionName` (default `string`) so `partitions`, the resolver return type, and `getPartition`’s `name` can be narrowed (e.g. `"read" | "write"`).
 - Unknown partition behavior is retained.
+- Partition shares differ from Java's `max(1, ceil(limit * percent))`. The global limit is split by the largest-remainder method, so shares never sum above the limit and can be 0. Ties go to the partition that comes first in the enumeration order of `partitions`: insertion order, except that integer-like names come first in ascending order.
 - `PartitionConfig` has required **`percent`** plus optional **`burstMode`** (`unbounded` default, `capped`, or `none`) for below-saturation bursting policy.
 - Java-style **sleep-then-reject** is not a `PartitionConfig` field; use **`DelayedRejectStrategy`** with `delayMsForContext` keyed by your partition mapping.
 - Factory helpers (`makePartitionedLimiter`, `makePartitionedBlockingLimiter`, `makePartitionedLifoBlockingLimiter`) add a convenience `delayMs` field per partition (`PartitionConfig & { delayMs?: number }`) and wire it to `DelayedRejectStrategy`.
@@ -186,10 +187,10 @@ The inner-first ordering is deliberate: local semaphore/partition rejection can 
 
 | Aspect                                     | Java                                           | TypeScript                                                                                                |
 | ------------------------------------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| FIFO blocking                              | `BlockingLimiter` wrapper                      | `BlockingBacklogRejection` + `enqueueOptions: { direction: "back" }` + `new LinkedWaiterQueue()`       |
-| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `BlockingBacklogRejection` + `enqueueOptions: { direction: "front" }` + `new LinkedWaiterQueue()`      |
+| FIFO blocking                              | `BlockingLimiter` wrapper                      | `BlockingBacklogRejection` + `enqueueOptions: { direction: "back" }` + `new LinkedWaiterQueue()`          |
+| LIFO blocking                              | `LifoBlockingLimiter` wrapper                  | `BlockingBacklogRejection` + `enqueueOptions: { direction: "front" }` + `new LinkedWaiterQueue()`         |
 | Delay then reject (`partitionRejectDelay`) | `Thread.sleep` in `AbstractPartitionedLimiter` | `DelayedRejectStrategy` (`delayMsForContext`, `maxConcurrentDelays`); delays are not on `PartitionConfig` |
-| Delay then block                           | N/A                                            | `DelayedThenBlockingRejection` (compose delay + FIFO/LIFO blocking)                                      |
+| Delay then block                           | N/A                                            | `DelayedThenBlockingRejection` (compose delay + FIFO/LIFO blocking)                                       |
 | Blocking mechanism                         | thread wait/latch primitives                   | Promise queues                                                                                            |
 | Cancellation                               | interrupt-based                                | `AbortSignal` support                                                                                     |
 
@@ -213,14 +214,14 @@ Additional details:
 
 The TypeScript package also exports convenience factory functions that map common Java limiter wrappers/builders to composed `Limiter` options:
 
-| Java usage pattern                                      | TypeScript helper                           |
-| ------------------------------------------------------- | ------------------------------------------- |
-| `SimpleLimiter.newBuilder()...build()`                  | `makeSimpleLimiter(...)`                    |
-| `BlockingLimiter.wrap(...)` / blocking builder variants | `makeBlockingLimiter(...)`                  |
-| `LifoBlockingLimiter...build()`                         | `makeLifoBlockingLimiter(...)`              |
-| partitioned limiter builder                             | `makePartitionedLimiter(...)`               |
-| partitioned + blocking                                  | `makePartitionedBlockingLimiter(...)`       |
-| partitioned + lifo blocking                             | `makePartitionedLifoBlockingLimiter(...)`   |
+| Java usage pattern                                      | TypeScript helper                         |
+| ------------------------------------------------------- | ----------------------------------------- |
+| `SimpleLimiter.newBuilder()...build()`                  | `makeSimpleLimiter(...)`                  |
+| `BlockingLimiter.wrap(...)` / blocking builder variants | `makeBlockingLimiter(...)`                |
+| `LifoBlockingLimiter...build()`                         | `makeLifoBlockingLimiter(...)`            |
+| partitioned limiter builder                             | `makePartitionedLimiter(...)`             |
+| partitioned + blocking                                  | `makePartitionedBlockingLimiter(...)`     |
+| partitioned + lifo blocking                             | `makePartitionedLifoBlockingLimiter(...)` |
 
 These are convenience APIs; the underlying model remains explicit composition via `new Limiter({...})`.
 
@@ -303,15 +304,15 @@ Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now.
 
 ## 8. Metrics API differences
 
-| Aspect               | Java                                         | TypeScript                                            |
-| -------------------- | -------------------------------------------- | ----------------------------------------------------- |
-| Sample listener type | nested `MetricRegistry.SampleListener`       | `DistributionMetric`                                  |
-| Sample methods       | multiple boxed-number variants               | single `addSample(value: number)`                     |
-| Counter type         | nested                                       | top-level `Counter`                                   |
-| `counter` tags       | varargs name/value pairs                     | object map `Record<string,string>`                    |
-| `distribution` tags  | varargs strings                              | varargs strings                                       |
+| Aspect               | Java                                         | TypeScript                                                    |
+| -------------------- | -------------------------------------------- | ------------------------------------------------------------- |
+| Sample listener type | nested `MetricRegistry.SampleListener`       | `DistributionMetric`                                          |
+| Sample methods       | multiple boxed-number variants               | single `addSample(value: number)`                             |
+| Counter type         | nested                                       | top-level `Counter`                                           |
+| `counter` tags       | varargs name/value pairs                     | object map `Record<string,string>`                            |
+| `distribution` tags  | varargs strings                              | varargs strings                                               |
 | `gauge`              | `Supplier<Number>` (registration often void) | attributes object + returned `Gauge` handle (`record(value)`) |
-| no-op registry       | singleton class                              | `NoopMetricRegistry` object constant                  |
+| no-op registry       | singleton class                              | `NoopMetricRegistry` object constant                          |
 
 Shared metric **name** strings used by `Limiter`, `PartitionedStrategy`, and adaptive limits (e.g. `limit`, `call`, `inflight`, `min_rtt`) live in the `MetricIds` constant, co-exported from `MetricRegistry.ts` with `MetricRegistry` / `NoopMetricRegistry`.
 
@@ -340,12 +341,12 @@ Java deprecated metric registration APIs (`registerDistribution`, `registerGauge
 
 Implementation mapping:
 
-| Java                 | TypeScript                               |
-| -------------------- | ---------------------------------------- |
-| `ExpAvgMeasurement`  | `ExpMovingAverage`                       |
-| `MinimumMeasurement` | `MinimumValue`                           |
-| -                    | `MostRecentValue` (new TS addition)      |
-| -                    | `DecayingHistogram` (new TS addition)    |
+| Java                 | TypeScript                            |
+| -------------------- | ------------------------------------- |
+| `ExpAvgMeasurement`  | `ExpMovingAverage`                    |
+| `MinimumMeasurement` | `MinimumValue`                        |
+| -                    | `MostRecentValue` (new TS addition)   |
+| -                    | `DecayingHistogram` (new TS addition) |
 
 ---
 

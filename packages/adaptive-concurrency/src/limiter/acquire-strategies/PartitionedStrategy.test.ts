@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Limiter } from "../../Limiter.js";
 import {
+  apportionGlobalLimit,
   PartitionedStrategy,
   type PartitionConfig,
 } from "./PartitionedStrategy.js";
@@ -15,7 +16,11 @@ import {
   type MetricRegistry,
 } from "../../MetricRegistry.js";
 import { isAllotmentUnavailableError } from "../../errors.js";
-import type { AcquireOptions, AcquireResult, LimitAllotment } from "../../types/Strategy.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "../../types/Strategy.js";
 
 function makeRecordingRegistry(): {
   registry: MetricRegistry;
@@ -113,7 +118,11 @@ describe("PartitionedStrategy", () => {
       if (l) listeners.push(l);
     }
 
-    assert.equal(listeners.length, 10, "Should use full global limit when partition is alone");
+    assert.equal(
+      listeners.length,
+      10,
+      "Should use full global limit when partition is alone",
+    );
   });
 
   it("should cap burst when burstMode is capped", async () => {
@@ -135,8 +144,12 @@ describe("PartitionedStrategy", () => {
       if (l) listeners.push(l);
     }
 
-    // limitAtGlobalSaturation(a)=ceil(10*0.3)=3, capped burst=ceil(3*2)=6
-    assert.equal(listeners.length, 6, "Burst should be capped by maxBurstMultiplier");
+    // limitAtGlobalSaturation(a)=3, capped burst=ceil(10*0.3*2)=6
+    assert.equal(
+      listeners.length,
+      6,
+      "Burst should be capped by maxBurstMultiplier",
+    );
   });
 
   it("should disallow burst when burstMode is none", async () => {
@@ -155,7 +168,7 @@ describe("PartitionedStrategy", () => {
       if (l) listeners.push(l);
     }
 
-    // limitAtGlobalSaturation(a)=ceil(10*0.3)=3 and no extra burst.
+    // limitAtGlobalSaturation(a)=3 and no extra burst.
     assert.equal(
       listeners.length,
       3,
@@ -285,6 +298,191 @@ describe("PartitionedStrategy", () => {
     assert.deepEqual(partition?.burstMode, {
       kind: "capped",
       maxBurstMultiplier: 3,
+    });
+  });
+
+  describe("apportionGlobalLimit", () => {
+    it("splits the limit by largest remainder, ties to the earlier partition", () => {
+      const percents = [0.6, 0.2, 0.2];
+      assert.deepEqual(apportionGlobalLimit(0, percents), [0, 0, 0]);
+      assert.deepEqual(apportionGlobalLimit(1, percents), [1, 0, 0]);
+      assert.deepEqual(apportionGlobalLimit(2, percents), [1, 1, 0]);
+      assert.deepEqual(apportionGlobalLimit(3, percents), [2, 1, 0]);
+      assert.deepEqual(apportionGlobalLimit(5, percents), [3, 1, 1]);
+      assert.deepEqual(apportionGlobalLimit(10, percents), [6, 2, 2]);
+    });
+
+    it("does not lose or gain a slot to floating-point error", () => {
+      assert.deepEqual(apportionGlobalLimit(10, [0.3, 0.7]), [3, 7]);
+      assert.deepEqual(apportionGlobalLimit(10, [0.1, 0.2]), [1, 2]);
+      assert.deepEqual(apportionGlobalLimit(3, [0.1, 0.1, 0.1]), [0, 0, 0]);
+    });
+
+    it("gives a tie to the lower index when remainders differ only by float error", () => {
+      // 4 * 0.6 - 2 is 0.3999999999999999 and 4 * 0.1 is 0.4, but the
+      // remainders are equal, so the first partition wins the tie.
+      assert.deepEqual(apportionGlobalLimit(4, [0.6, 0.3, 0.1]), [3, 1, 0]);
+      assert.deepEqual(apportionGlobalLimit(4, [0.1, 0.3, 0.6]), [1, 1, 2]);
+    });
+
+    it("leaves unassigned the part of the limit that no partition claims", () => {
+      assert.deepEqual(apportionGlobalLimit(10, [0.25, 0.25]), [3, 2]);
+      assert.deepEqual(apportionGlobalLimit(1, [0.3, 0.3]), [0, 0]);
+    });
+
+    it("never sums above the limit and keeps each share within 1 of its quota", () => {
+      const percentSets = [
+        [0.6, 0.2, 0.2],
+        [0.5, 0.5],
+        [1 / 3, 1 / 3, 1 / 3],
+        [0.9, 0.05, 0.05],
+        [0.45, 0.3, 0.15],
+        [0, 1],
+      ];
+      for (const percents of percentSets) {
+        for (let limit = 0; limit <= 200; limit++) {
+          const shares = apportionGlobalLimit(limit, percents);
+          const total = shares.reduce((sum, share) => sum + share, 0);
+          const claimed = percents.reduce((sum, percent) => sum + percent, 0);
+          assert.ok(total <= limit, `limit ${limit}, ${percents}: ${shares}`);
+          assert.equal(
+            total,
+            Math.floor(limit * claimed + 1e-9),
+            `limit ${limit}, ${percents}: ${shares}`,
+          );
+          shares.forEach((share, i) => {
+            assert.ok(
+              Math.abs(share - limit * percents[i]!) < 1 + 1e-9,
+              `limit ${limit}, ${percents}: ${shares}`,
+            );
+          });
+        }
+      }
+    });
+  });
+
+  describe("small global limits", () => {
+    const priorityPartitions = {
+      interactive: { percent: 0.6 },
+      background: {
+        percent: 0.2,
+        burstMode: { kind: "capped", maxBurstMultiplier: 3 },
+      },
+      bulk: {
+        percent: 0.2,
+        burstMode: { kind: "capped", maxBurstMultiplier: 3 },
+      },
+    } satisfies Record<string, PartitionConfig>;
+
+    it("admits nothing once the global limit drops to 0", async () => {
+      const limit = new SettableLimit(10);
+      const limiter = makePartitionedLimiter<string>({
+        limit,
+        partitionResolver: (ctx) => ctx,
+        partitions: priorityPartitions,
+      });
+
+      limit.setLimit(0);
+
+      for (const context of ["interactive", "background", "bulk", "other"]) {
+        assert.equal(
+          await acquireOrUndefined(limiter, { context }),
+          undefined,
+          `${context} must be rejected at a global limit of 0`,
+        );
+      }
+    });
+
+    it("keeps the saturation slot of a limit of 1 for the first partition", async () => {
+      const limiter = makePartitionedLimiter<string>({
+        limit: new FixedLimit(1),
+        partitionResolver: (ctx) => ctx,
+        partitions: priorityPartitions,
+      });
+
+      // An idle limiter lets a low-priority partition use the one slack slot.
+      const bulk = await acquireOrUndefined(limiter, { context: "bulk" });
+      assert.ok(bulk, "bulk may use the slack slot, though its share is 0");
+
+      // At saturation, only a partition with a nonzero share is admitted.
+      const interactive = await acquireOrUndefined(limiter, {
+        context: "interactive",
+      });
+      assert.ok(
+        interactive,
+        "interactive's share of 1 admits it at saturation",
+      );
+      assert.equal(
+        await acquireOrUndefined(limiter, { context: "background" }),
+        undefined,
+      );
+      assert.equal(
+        await acquireOrUndefined(limiter, { context: "bulk" }),
+        undefined,
+      );
+    });
+
+    it("gives a share-0 partition one slot of slack in every burst mode", async () => {
+      for (const burstMode of [
+        { kind: "none" },
+        { kind: "capped", maxBurstMultiplier: 1 },
+      ] satisfies PartitionConfig["burstMode"][]) {
+        const limiter = makePartitionedLimiter<string>({
+          limit: new FixedLimit(2),
+          partitionResolver: (ctx) => ctx,
+          partitions: {
+            main: { percent: 0.9 },
+            minor: { percent: 0.1, burstMode },
+          },
+        });
+
+        const first = await acquireOrUndefined(limiter, { context: "minor" });
+        assert.ok(first, `${burstMode.kind}: minor gets one slack slot`);
+        assert.equal(
+          await acquireOrUndefined(limiter, { context: "minor" }),
+          undefined,
+          `${burstMode.kind}: minor gets only one slack slot`,
+        );
+      }
+    });
+
+    it("breaks ties in the enumeration order of partitions, not their declaration order", async () => {
+      // JavaScript enumerates integer-like keys first, in ascending order, so
+      // "1" comes before "2" although "2" is declared first.
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 1,
+        partitionResolver: (ctx) => ctx,
+        partitions: { "2": { percent: 0.5 }, "1": { percent: 0.5 } },
+      });
+
+      assert.equal(strategy.getPartition("1")?.limitAtGlobalSaturation, 1);
+      assert.equal(strategy.getPartition("2")?.limitAtGlobalSaturation, 0);
+    });
+
+    it("caps a capped burst from the unrounded share", async () => {
+      const limiter = makePartitionedLimiter<string>({
+        limit: new FixedLimit(10),
+        partitionResolver: (ctx) => ctx,
+        partitions: {
+          main: { percent: 0.85 },
+          minor: {
+            percent: 0.15,
+            burstMode: { kind: "capped", maxBurstMultiplier: 2 },
+          },
+        },
+      });
+
+      const acquired = [];
+      for (let i = 0; i < 10; i++) {
+        const allotment = await acquireOrUndefined(limiter, {
+          context: "minor",
+        });
+        if (allotment) acquired.push(allotment);
+      }
+
+      // share(minor) = 1 or 2 depending on rounding; the cap is
+      // ceil(10 * 0.15 * 2) = 3 either way.
+      assert.equal(acquired.length, 3);
     });
   });
 

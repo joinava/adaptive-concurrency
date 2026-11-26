@@ -39,6 +39,23 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
   limiter gave no allotment and `fn` did not run. If `acquire()` rejects, for
   example after an abort, they reject too. `QuotaNotAvailable` is removed.
 - `@zingage/errors` (^1.1.0) is a new peer dependency.
+- `PartitionedStrategy` splits the global limit among partitions by the
+  largest-remainder method. Each partition gets the floor of
+  `globalLimit * percent`, and the leftover slots go to the largest fractional
+  remainders. The shares were
+  `max(1, ceil(globalLimit * percent))` each.
+  - The shares never sum to more than the global limit, and a share can be 0.
+    With 60%/20%/20% partitions, a limit of 1 gives 1/0/0 (was 1/1/1).
+  - A tie goes to the partition that comes first in the enumeration order of
+    `partitions`. That is insertion order, except that integer-like names
+    such as `"1"` come first, in ascending numeric order. List partitions in
+    priority order, and do not give them integer-like names.
+  - A `capped` burst is `ceil(globalLimit * percent * maxBurstMultiplier)`,
+    from the unrounded share (was
+    `ceil(limitAtGlobalSaturation * maxBurstMultiplier)`).
+  - Below saturation, a `capped` or `none` partition with a nonzero percent
+    may still use one slot of slack, so a share of 0 cannot starve it.
+  - A partition with a percent of 0 has a share of 0 (was 1).
 
 ### Added
 
@@ -59,6 +76,13 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
 
 ### Fixed
 
+- A `PartitionedStrategy` admitted requests at a global limit of 0. At limit 0
+  every acquire takes the saturation path, and the floor of 1 let each
+  partition admit one request. Now no partition is admitted at limit 0, so
+  the recovery probe controls when traffic resumes.
+- At a small global limit, the floor of 1 let every partition admit a request
+  at saturation, so a pod at limit 1 could run one request per partition and
+  partition priority had no effect.
 - The RTT sample left out the time that `AllotmentReservation.commit()`
   takes. Before, `Limiter` started the operation's clock before the commit,
   so a slow async commit inflated every RTT. The acquire-time metric now

@@ -150,8 +150,11 @@ describe("makePartitionedLimiter", () => {
 
     await acquireOk(limiter, { context: "a" });
     const slow = limiter.acquire({ context: "a" });
+    // At limit 1 the 50/50 split gives "a" the only slot and "b" a share of
+    // 0, so "b" is rejected. The one delay slot is taken by `slow`, so the
+    // rejection must skip its 50 ms delay.
     const t0 = performance.now();
-    await acquireOk(limiter, { context: "b" });
+    await assertUnavailable(limiter.acquire({ context: "b" }));
     assert.ok(performance.now() - t0 < 20);
     await assertUnavailable(slow);
   });
