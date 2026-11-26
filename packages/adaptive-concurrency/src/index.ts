@@ -18,7 +18,6 @@ export {
   isAdaptiveDropError,
   isAdaptiveTimeoutError,
   isRunResult,
-  QuotaNotAvailable,
   success,
   type RunDropped,
   type RunIgnore,
@@ -33,6 +32,8 @@ export type {
   LimitAllotment,
   LimiterState,
   MaybePromise,
+  Result,
+  RetryAcquire,
 } from "./types/index.js";
 export {
   makeLimitedFunction,
@@ -40,6 +41,11 @@ export {
   type CallWithLimiter,
   type RunCallbackArgs,
 } from "./withLimiter.js";
+export {
+  adaptiveConcurrencyErrorVocabulary,
+  allotmentUnavailableError,
+  isAllotmentUnavailableError,
+} from "./errors.js";
 
 // Limit algorithms
 export { AIMDLimit, type AIMDLimitOptions } from "./limit/AIMDLimit.js";

@@ -2,6 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makePartitionedBlockingLimiter } from "./makePartitionedBlockingLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
+import type { AcquireOptions, AcquireResult, LimitAllotment } from "../../types/Strategy.js";
 
 describe("makePartitionedBlockingLimiter", () => {
   it("acquires immediately when under limit", async () => {
@@ -11,7 +13,7 @@ describe("makePartitionedBlockingLimiter", () => {
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },
     });
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("waits for capacity", async () => {
@@ -22,18 +24,18 @@ describe("makePartitionedBlockingLimiter", () => {
       partitions: { a: { percent: 1, delayMs: 0 } },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const waiting = limiter.acquire({ context: "a" });
     setTimeout(() => first!.releaseAndRecordSuccess(), 25);
 
     const second = await waiting;
-    assert.ok(second);
-    await second!.releaseAndRecordSuccess();
+    assert.ok(second.ok);
+    await second.value.releaseAndRecordSuccess();
   });
 
-  it("returns undefined on backlog timeout", async () => {
+  it("resolves { ok: false } on backlog timeout", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
       backlogTimeout: 100,
       limiter: { limit: new FixedLimit(1) },
@@ -41,13 +43,12 @@ describe("makePartitionedBlockingLimiter", () => {
       partitions: { a: { percent: 1, delayMs: 0 } },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const start = performance.now();
-    const second = await limiter.acquire({ context: "a" });
+    await assertUnavailable(limiter.acquire({ context: "a" }));
     const elapsed = performance.now() - start;
-    assert.equal(second, undefined);
     assert.ok(elapsed >= 50);
   });
 
@@ -72,7 +73,7 @@ describe("makePartitionedBlockingLimiter", () => {
       partitions: { a: { percent: 1, delayMs: 0 } },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const waiters = [
@@ -81,7 +82,7 @@ describe("makePartitionedBlockingLimiter", () => {
       limiter.acquire({ context: "a" }),
     ];
     await first!.releaseAndRecordSuccess();
-    assert.ok(await waiters[0]);
+    assert.ok((await waiters[0])?.ok);
   });
 
   it("applies delay before blocking", async () => {
@@ -92,7 +93,7 @@ describe("makePartitionedBlockingLimiter", () => {
       partitions: { a: { percent: 1, delayMs: 40 } },
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const waiting = limiter.acquire({ context: "a" });
@@ -102,24 +103,39 @@ describe("makePartitionedBlockingLimiter", () => {
     const second = await waiting;
     const elapsed = performance.now() - start;
 
-    assert.ok(second);
+    assert.ok(second.ok);
     assert.ok(elapsed >= 30, `expected at least partition delay, got ${elapsed}ms`);
-    await second!.releaseAndRecordSuccess();
+    await second.value.releaseAndRecordSuccess();
   });
 
-  it("returns undefined when aborted while waiting", async () => {
+  it("rejects with the abort reason when aborted while waiting", async () => {
     const limiter = makePartitionedBlockingLimiter<string>({
       backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
       partitionResolver: (ctx) => ctx,
       partitions: { a: { percent: 1, delayMs: 0 } },
     });
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
 
     const ac = new AbortController();
     const waiting = limiter.acquire({ context: "a", signal: ac.signal });
     setTimeout(() => ac.abort(), 20);
-    assert.equal(await waiting, undefined);
+    await assert.rejects(waiting, { name: "AbortError" });
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

@@ -28,6 +28,9 @@ importers:
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.2
+      '@zingage/errors':
+        specifier: ^1.1.0
+        version: 1.1.0
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
@@ -251,6 +254,9 @@ packages:
   '@types/node@25.5.2':
     resolution: {integrity: sha512-tO4ZIRKNC+MDWV4qKVZe3Ql/woTnmHDr5JD8UI5hn2pwBrHEwOEMZK7WlNb5RKB6EoJ02gwmQS9OrjuFnZYdpg==}
 
+  '@zingage/errors@1.1.0':
+    resolution: {integrity: sha512-RJkhoehJ7PN2RdMiUG173WirEzrBgOs4GVwOhVeuxKKuGh9C3aCqf2HZ+uNDVKbxqmW5ufeitSKipEWIAVxDtA==}
+
   cluster-key-slot@1.1.1:
     resolution: {integrity: sha512-rwHwUfXL40Chm1r08yrhU3qpUvdVlgkKNeyeGPOxnW8/SyVDvgRaed/Uz54AqWNaTCAThlj6QAs3TZcKI0xDEw==}
     engines: {node: '>=0.10.0'}
@@ -270,6 +276,9 @@ packages:
 
   es-toolkit@1.46.1:
     resolution: {integrity: sha512-5eNtXOs3tbfxXOj04tjjseeWkRWaoCjdEI+96DgwzZoe6c9juL49pXlzAFTI72aWC9Y8p7168g6XIKjh7k6pyQ==}
+
+  es-toolkit@1.47.1:
+    resolution: {integrity: sha512-5RAqEwf4P4E17p+W75KLOWw/nOvKZzSQpxM32IpI2KZLaVonjTrZ0Ai5ghMaVI9eKC2p8eoQgcBdkEDgzFk6+Q==}
 
   esbuild@0.27.4:
     resolution: {integrity: sha512-Rq4vbHnYkK5fws5NF7MYTU68FPRE1ajX7heQ/8QXXWqNgqqJ/GkmmyxIzUnf2Sr/bakf8l54716CcMGHYhMrrQ==}
@@ -361,6 +370,13 @@ packages:
     resolution: {integrity: sha512-PlBfpQwiUvGViBNX84Yxwjsdhd1TUlXr6zjX7eoirtCPIr08NAmxwa+fcYBTeRQxHo9YC9wwF3m9i700sHma8g==}
     engines: {node: '>=20'}
 
+  type-fest@5.8.0:
+    resolution: {integrity: sha512-YGYEVz3Fm5iy/AybuA0oyNFq7H4CgQNfRp/qfe8nurE1kuCeNm3/vfm9X4Mtl+qLyaKJUh5xrFZwogr41SMjYA==}
+    engines: {node: '>=20'}
+
+  type-party@0.10.2:
+    resolution: {integrity: sha512-N5bas7gv6QqtFsOTMBgh19tXrqM+iwcI8Vpsr0wI0cuuuSjNi2BSrGyx/MiLpGQ4wLz9StAjs9b0c48IBxWoKw==}
+
   type-party@0.7.3:
     resolution: {integrity: sha512-6IuzC5bi896TXv23XuN2b5eGPMX+KeU40fKz0QlEeT/qeaafG+pZa1ArhprSCufQ/aej9K1RZF930by0if+UyA==}
 
@@ -374,6 +390,9 @@ packages:
 
   undici-types@7.18.2:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
+
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -471,6 +490,13 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
+  '@zingage/errors@1.1.0':
+    dependencies:
+      es-toolkit: 1.47.1
+      type-fest: 5.8.0
+      type-party: 0.10.2
+      zod: 4.6.7
+
   cluster-key-slot@1.1.1: {}
 
   debug@4.4.3:
@@ -480,6 +506,8 @@ snapshots:
   denque@2.1.0: {}
 
   es-toolkit@1.46.1: {}
+
+  es-toolkit@1.47.1: {}
 
   esbuild@0.27.4:
     optionalDependencies:
@@ -588,6 +616,16 @@ snapshots:
     dependencies:
       tagged-tag: 1.0.0
 
+  type-fest@5.8.0:
+    dependencies:
+      tagged-tag: 1.0.0
+
+  type-party@0.10.2:
+    dependencies:
+      safe-stable-stringify: 2.5.0
+      tagged-tag: 1.0.0
+      type-fest: 5.5.0
+
   type-party@0.7.3:
     dependencies:
       safe-stable-stringify: 2.5.0
@@ -598,3 +636,5 @@ snapshots:
   undici-types@6.21.0: {}
 
   undici-types@7.18.2: {}
+
+  zod@4.6.7: {}

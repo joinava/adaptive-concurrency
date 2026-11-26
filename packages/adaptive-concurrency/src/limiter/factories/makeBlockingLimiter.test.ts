@@ -2,6 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { makeBlockingLimiter } from "./makeBlockingLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "../../types/Strategy.js";
 
 describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
   it("acquires immediately when under limit", async () => {
@@ -9,7 +15,7 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
       limiter: { limit: new FixedLimit(10) },
     });
 
-    const allotment = await limiter.acquire({});
+    const allotment = await acquireOk(limiter, {});
     assert.ok(allotment);
     await allotment!.releaseAndRecordSuccess();
   });
@@ -20,31 +26,30 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({});
+    const first = await acquireOk(limiter, {});
     assert.ok(first);
 
     const waiting = limiter.acquire({});
     setTimeout(() => first!.releaseAndRecordSuccess(), 50);
 
     const second = await waiting;
-    assert.ok(second);
-    await second!.releaseAndRecordSuccess();
+    assert.ok(second.ok);
+    await second.value.releaseAndRecordSuccess();
   });
 
-  it("returns undefined on backlog timeout", async () => {
+  it("resolves { ok: false } on backlog timeout", async () => {
     const limiter = makeBlockingLimiter<void>({
       backlogTimeout: 100,
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({});
+    const first = await acquireOk(limiter, {});
     assert.ok(first);
 
     const start = performance.now();
-    const second = await limiter.acquire({});
+    await assertUnavailable(limiter.acquire({}));
     const elapsed = performance.now() - start;
 
-    assert.equal(second, undefined);
     assert.ok(elapsed >= 50);
   });
 
@@ -65,31 +70,55 @@ describe("makeBlockingLimiter (Netflix BlockingLimiter semantics)", () => {
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({});
+    const first = await acquireOk(limiter, {});
     assert.ok(first);
 
-    const waiters = [limiter.acquire({}), limiter.acquire({}), limiter.acquire({})];
+    const ac = new AbortController();
+    const waiters = [
+      limiter.acquire({ signal: ac.signal }),
+      limiter.acquire({ signal: ac.signal }),
+      limiter.acquire({ signal: ac.signal }),
+    ];
     await first!.releaseAndRecordSuccess();
 
     const second = await waiters[0];
-    assert.ok(second);
+    assert.ok(second?.ok);
+
+    // The other waiters never get an allotment. Abort them, so that they
+    // settle now instead of at the backlog timeout.
+    ac.abort();
+    await Promise.allSettled(waiters);
   });
 
-  it("returns undefined when aborted while waiting", async () => {
+  it("rejects with the abort reason when aborted while waiting", async () => {
     const limiter = makeBlockingLimiter<void>({
       backlogTimeout: 5_000,
       limiter: { limit: new FixedLimit(1) },
     });
 
-    const first = await limiter.acquire({});
+    const first = await acquireOk(limiter, {});
     assert.ok(first);
 
     const ac = new AbortController();
     const waiting = limiter.acquire({ signal: ac.signal });
     setTimeout(() => ac.abort(), 20);
 
-    const second = await waiting;
-    assert.equal(second, undefined);
+    await assert.rejects(waiting, { name: "AbortError" });
     await first!.releaseAndRecordSuccess();
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

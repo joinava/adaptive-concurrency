@@ -49,7 +49,8 @@ import type { RedisTokenBucket } from "./RedisTokenBucket.js";
  * - **Inner `cancel()` throws while the bucket denies.** Here the strategy is
  *   rejecting, so it returns `undefined` and the caller never receives a
  *   reservation. It cannot learn that the inner leaked a permit, and throwing
- *   instead would turn a bucket denial into a thrown `acquire()`. So the error
+ *   instead would make `acquire()` reject with the inner's error, not with
+ *   the `allotmentUnavailableError` of a bucket denial. So the error
  *   is swallowed and reported through {@link
  *   RedisTokenBucketStrategyOptions.onReservationError}, which exists for
  *   exactly this case: a fault the caller has no other way to observe.

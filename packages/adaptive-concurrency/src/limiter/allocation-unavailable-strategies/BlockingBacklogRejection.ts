@@ -1,15 +1,47 @@
+import { allotmentUnavailableError } from "../../errors.js";
 import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
   LimitAllotment,
+  Result,
+  RetryAcquire,
 } from "../../types/Strategy.js";
 import type { EnqueueOptions } from "../../utils/LinkedWaiterQueue.js";
 
 export type Waiter<ContextT> = {
   context: ContextT;
-  retry: (context: ContextT) => AcquireResult;
-  resolve: (allotment: LimitAllotment | undefined) => void;
+  retry: RetryAcquire<ContextT>;
+  resolve: (allotment: LimitAllotment) => void;
 };
+
+/**
+ * The result when the backlog is full. Made once, because refusals are
+ * common under load, and a new error would capture a stack trace for each
+ * one. So its stack points at module load, and every refusal from this site
+ * shares the error: do not mutate it. A site that needs a per-call fact,
+ * such as a `retryAfter`, makes its own error instead.
+ */
+const BACKLOG_FULL = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message: "No allotment is available, and the backlog is full",
+  }),
+} as const);
+
+/**
+ * The result when a request waits in the backlog for its whole timeout. Made
+ * once, because refusals are common under load, and a new error would
+ * capture a stack trace for each one. So its stack points at module load,
+ * and every refusal from this site shares the error: do not mutate it. A
+ * site that needs a per-call fact, such as a `retryAfter`, makes its own
+ * error instead.
+ */
+const BACKLOG_TIMEOUT = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message: "No allotment became available within the backlog timeout",
+  }),
+} as const);
 
 export const MAX_TIMEOUT = 60 * 60 * 1000; // 1 hour
 
@@ -81,17 +113,23 @@ export class BlockingBacklogRejection<
     }
   }
 
+  /**
+   * Waits in the backlog until a retry gets an allotment. Resolves with
+   * `{ ok: false, error }` when the backlog is full, or when the wait
+   * reaches the backlog timeout. Rejects with the signal's reason when the
+   * signal aborts.
+   */
   onAllotmentUnavailable(
     context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
+    retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment | undefined> {
+  ): AcquireResult {
     if (signal?.aborted) {
-      return Promise.resolve(undefined);
+      return Promise.reject(signal.reason);
     }
 
     if (this.queue.size() >= this.backlogSize) {
-      return Promise.resolve(undefined);
+      return Promise.resolve(BACKLOG_FULL);
     }
 
     return this.waitInBacklog(context, retry, signal);
@@ -172,30 +210,32 @@ export class BlockingBacklogRejection<
 
   private waitInBacklog(
     context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
+    retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment | undefined> {
+  ): AcquireResult {
     const timeout = this.getBacklogTimeout(context);
-    return new Promise<LimitAllotment | undefined>((resolve) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
-      const settle = (allotment: LimitAllotment | undefined): void => {
+      // `undefined` is an abort, which rejects with the signal's reason.
+      const settle = (result: Result<LimitAllotment> | undefined): void => {
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(allotment);
+        if (result) resolve(result);
+        else reject(signal?.reason);
       };
 
       const waiter: Waiter<ContextT> = {
         context,
         retry,
-        resolve: (allotment) => settle(allotment),
+        resolve: (allotment) => settle({ ok: true, value: allotment }),
       };
 
       const enqueueOptions = this.getEnqueueOptions(context);
       const { handle } = this.queue.enqueue(waiter, enqueueOptions);
       this.scheduleDrain();
 
-      const timer = setTimeout(() => settle(undefined), timeout);
+      const timer = setTimeout(() => settle(BACKLOG_TIMEOUT), timeout);
       const onAbort = (): void => settle(undefined);
       const cleanup = (): void => {
         clearTimeout(timer);

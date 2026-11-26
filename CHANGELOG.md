@@ -9,6 +9,54 @@ The package is pre-1.0, so a minor version bump can contain breaking changes.
 
 Releases before 0.14.0 have no entries; see the git history.
 
+## [0.15.0] - Unreleased
+
+Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
+0.3.0.
+
+### Breaking
+
+- `Limiter.acquire()` resolves with a `Result<LimitAllotment>`, not with a
+  `LimitAllotment | undefined`. `AcquireResult` is now
+  `Promise<Result<LimitAllotment>>`, where
+  `Result<T> = { ok: true, value: T } | { ok: false, error: Error }`.
+  - `{ ok: true, value }` holds the allotment.
+  - `{ ok: false, error }` means no allotment was available, the backlog was
+    full, or the request timed out in the backlog. `error` is an
+    `allotmentUnavailableError`.
+  - The promise rejects with the signal's `reason` when the caller's signal
+    aborts, including a signal that had aborted before the call. It also
+    rejects when a strategy, the clock, or another callback throws.
+- `AllotmentUnavailableStrategy.onAllotmentUnavailable` returns the same
+  `AcquireResult`. To give up, it resolves with `{ ok: false, error }`, where
+  `error` is an `allotmentUnavailableError` that it makes. On abort, it
+  rejects with the signal's `reason`. Its `retry` callback is typed
+  `RetryAcquire<ContextT>` and still resolves with `undefined` while the
+  acquire strategy refuses. A strategy that resolves with anything that is
+  not a result makes `acquire()` reject with a `TypeError`.
+- `withLimiter` and `makeLimitedFunction` resolve with a `Result<T>`:
+  `{ ok: true, value }`, or `acquire()`'s `{ ok: false, error }` when the
+  limiter gave no allotment and `fn` did not run. If `acquire()` rejects, for
+  example after an abort, they reject too. `QuotaNotAvailable` is removed.
+- `@zingage/errors` (^1.1.0) is a new peer dependency.
+
+### Added
+
+- `Result<T, E = Error>`.
+- `allotmentUnavailableError`, `isAllotmentUnavailableError`, and
+  `adaptiveConcurrencyErrorVocabulary`. The error type
+  `ALLOTMENT_UNAVAILABLE` is under the `SERVICE_UNAVAILABLE` root: safe to
+  retry, clears on its own, and signals high load. A throw site can state a
+  `retryAfter`, or a different `load`. An app that reads errors with
+  `@zingage/errors` lists the vocabulary in `makeErrorHelpers({ vocabularies })`.
+- `DelayedRejectStrategy.delay(context, signal)`, the delay alone, which
+  `DelayedThenBlockingRejection` uses.
+- `LimitAllotment.releaseAndRecordSuccess` and `releaseAndRecordDropped` take
+  an optional `weight`: the amount of work that the operation represented,
+  for example the number of items in a batch call. `Limiter` passes it to the
+  limit algorithm as a new optional last argument of `AdaptiveLimit.addSample`.
+  The built-in limits ignore it, and `WindowedLimit` does not forward it.
+
 ## [0.14.0] - 2026-09-16
 
 ### Breaking

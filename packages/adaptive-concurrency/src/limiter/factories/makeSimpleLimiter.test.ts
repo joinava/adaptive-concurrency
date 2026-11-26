@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import { makeSimpleLimiter } from "./makeSimpleLimiter.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "../../types/Strategy.js";
 
 describe("makeSimpleLimiter", () => {
   it("uses limiter capacity until total limit is reached", async () => {
@@ -10,13 +16,12 @@ describe("makeSimpleLimiter", () => {
       limit: new FixedLimit(2),
     });
 
-    const a = await limiter.acquire({ context: "a" });
-    const b = await limiter.acquire({ context: "b" });
-    const c = await limiter.acquire({ context: "c" });
+    const a = await acquireOk(limiter, { context: "a" });
+    const b = await acquireOk(limiter, { context: "b" });
 
     assert.ok(a);
     assert.ok(b);
-    assert.equal(c, undefined);
+    await assertUnavailable(limiter.acquire({ context: "c" }));
   });
 
   it("releases limit when allotment completes", async () => {
@@ -24,12 +29,12 @@ describe("makeSimpleLimiter", () => {
       limit: new FixedLimit(1),
     });
 
-    const first = await limiter.acquire({ context: "a" });
+    const first = await acquireOk(limiter, { context: "a" });
     assert.ok(first);
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assertUnavailable(limiter.acquire({ context: "a" }));
 
     await first.releaseAndRecordSuccess();
-    assert.ok(await limiter.acquire({ context: "a" }));
+    await acquireOk(limiter, { context: "a" });
   });
 
   it("supports bypass resolver", async () => {
@@ -38,15 +43,15 @@ describe("makeSimpleLimiter", () => {
       bypassResolver: (ctx) => ctx === "vip",
     });
 
-    assert.ok(await limiter.acquire({ context: "normal" }));
-    assert.equal(await limiter.acquire({ context: "normal" }), undefined);
-    assert.ok(await limiter.acquire({ context: "vip" }));
+    await acquireOk(limiter, { context: "normal" });
+    await assertUnavailable(limiter.acquire({ context: "normal" }));
+    await acquireOk(limiter, { context: "vip" });
   });
 
   it("tracks inflight count", async () => {
     const limiter = makeSimpleLimiter<string>({ limit: new FixedLimit(2) });
     assert.equal(limiter.getInflight(), 0);
-    const allotment = (await limiter.acquire({ context: "x" }))!;
+    const allotment = await acquireOk(limiter, { context: "x" });
     assert.equal(limiter.getInflight(), 1);
     await allotment.releaseAndRecordSuccess();
     assert.equal(limiter.getInflight(), 0);
@@ -56,23 +61,38 @@ describe("makeSimpleLimiter", () => {
     const limit = new SettableLimit(1);
     const limiter = makeSimpleLimiter<string>({ limit });
 
-    assert.ok(await limiter.acquire({ context: "x" }));
-    assert.equal(await limiter.acquire({ context: "x" }), undefined);
+    await acquireOk(limiter, { context: "x" });
+    await assertUnavailable(limiter.acquire({ context: "x" }));
 
     limit.setLimit(2);
-    assert.ok(await limiter.acquire({ context: "x" }));
+    await acquireOk(limiter, { context: "x" });
   });
 
   it("releases on ignore and dropped", async () => {
     const limiter = makeSimpleLimiter<string>({ limit: new FixedLimit(1) });
-    const a = (await limiter.acquire({ context: "x" }))!;
+    const a = await acquireOk(limiter, { context: "x" });
     await a.releaseAndIgnore();
-    const afterIgnore = await limiter.acquire({ context: "x" });
+    const afterIgnore = await acquireOk(limiter, { context: "x" });
     assert.ok(afterIgnore);
     await afterIgnore.releaseAndRecordSuccess();
 
-    const b = (await limiter.acquire({ context: "x" }))!;
+    const b = await acquireOk(limiter, { context: "x" });
     await b.releaseAndRecordDropped();
-    assert.ok(await limiter.acquire({ context: "x" }));
+    await acquireOk(limiter, { context: "x" });
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(acquired: AcquireResult): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

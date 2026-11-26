@@ -78,13 +78,13 @@ export function concurrencyLimitMiddleware(
     });
 
   return async (req: HttpRequest, res: HttpResponse, next: NextFunction) => {
-    const allotment = await limiter.acquire({ context: req });
-
-    if (!allotment) {
+    const acquired = await limiter.acquire({ context: req });
+    if (!acquired.ok) {
       res.statusCode = throttleStatus;
       res.end(throttleMessage);
       return;
     }
+    const allotment = acquired.value;
 
     let released = false;
     const releaseSuccess = async () => {

@@ -1,3 +1,4 @@
+import { allotmentUnavailableError } from "./errors.js";
 import { GradientLimit } from "./limit/GradientLimit.js";
 import type { AdaptiveLimit } from "./limit/StreamingLimit.js";
 import { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
@@ -16,6 +17,8 @@ import type {
   AcquireStrategy,
   AllotmentUnavailableStrategy,
   LimitAllotment,
+  Result,
+  RetryAcquire,
 } from "./types/Strategy.js";
 
 export type { MaybePromise } from "./types/MaybePromise.js";
@@ -26,6 +29,7 @@ export type {
   AllotmentUnavailableStrategy,
   LimitAllotment,
   LimiterState,
+  RetryAcquire,
 } from "./types/Strategy.js";
 export {
   makeLimitedFunction,
@@ -37,6 +41,22 @@ export {
 // ---------------------------------------------------------------------------
 // Limiter options
 // ---------------------------------------------------------------------------
+/**
+ * The result of an acquire that gets no allotment when the limiter has no
+ * {@link AllotmentUnavailableStrategy}. Made once, because refusals are
+ * common under load, and a new error would capture a stack trace for each
+ * one. So its stack points at module load, and every refusal from this site
+ * shares the error: do not mutate it. A site that needs a per-call fact,
+ * such as a `retryAfter`, makes its own error instead.
+ */
+const NO_ALLOTMENT_AND_NO_STRATEGY = Object.freeze({
+  ok: false,
+  error: allotmentUnavailableError({
+    message:
+      "No allotment is available, and the limiter has no strategy to wait for one",
+  }),
+} as const);
+
 let idCounter = 0;
 
 const defaultClock = (): number => performance.now();
@@ -447,23 +467,32 @@ export class Limiter<
     this.maybeArmRecoveryProbe();
   }
 
+  /**
+   * Gets an allotment for one operation. See {@link AcquireResult} for how
+   * the promise settles: it resolves with `{ ok: false, error }` when the
+   * limiter gives no allotment, and rejects with the signal's `reason` when
+   * the signal aborts first.
+   */
   async acquire(options?: AcquireOptions<Context>): AcquireResult {
-    if (options?.signal?.aborted) return undefined;
+    const signal = options?.signal;
+    signal?.throwIfAborted();
     const ctx = (options?.context ?? undefined) as Context;
 
     if (this.bypassResolver?.(ctx)) {
       void fireAndForget(() => {
         this.acquireBypassedCounter.add(1);
       });
-      return this.createBypassedAllotment(ctx);
+      return { ok: true, value: this.createBypassedAllotment(ctx) };
     }
 
     const acquireStart = this.clock();
     const allotment = await this.tryAcquireCore(ctx, acquireStart);
+    if (allotment) {
+      return this.keepUnlessAborted(allotment, signal);
+    }
 
-    // Called when this method is retunring undefined; not called for each
-    // individual acquire attempt that may be triggered by the rejection
-    // strategy.
+    // Called once, when this method resolves without an allotment; not called for each individual acquire attempt that may be
+    // triggered by the rejection strategy.
     const recordFinalAcquireFailed = () => {
       void fireAndForget(() => {
         const now = this.clock();
@@ -471,59 +500,67 @@ export class Limiter<
       });
     };
 
-    if (!allotment) {
-      if (!this.rejectionStrategy) {
-        void recordFinalAcquireFailed();
+    const rejectionStrategy = this.rejectionStrategy;
+    if (!rejectionStrategy) {
+      recordFinalAcquireFailed();
+      return NO_ALLOTMENT_AND_NO_STRATEGY;
+    }
+
+    // If the signal aborted here, there is nothing to clean up, as we didn't
+    // acquire anything. Also, don't record the acquire time, as we aborted
+    // mid-way (didn't invoke the rejection strategy).
+    signal?.throwIfAborted();
+
+    const retry: RetryAcquire<Context> = async (retryCtx) => {
+      if (signal?.aborted) {
         return undefined;
       }
+      return this.tryAcquireCore(retryCtx, acquireStart);
+    };
 
-      // if signal aborted here, nothing to cleanup, as we didn't acquire
-      // anything. Also, don't try to record the acquire time, as we aborted
-      // mid-way (didn't invoke the rejection strategy).
-      if (options?.signal?.aborted) {
-        return undefined;
-      }
+    // A rejection is an abort, or a fault in the strategy. Neither is an
+    // unavailable allotment, so it propagates and records no acquire time.
+    // `| undefined` is for the check below.
+    const result: Result<LimitAllotment> | undefined =
+      await rejectionStrategy.onAllotmentUnavailable(ctx, retry, signal);
 
-      const result = await this.rejectionStrategy.onAllotmentUnavailable(
-        ctx,
-        async (retryCtx) => {
-          if (options?.signal?.aborted) {
-            return undefined;
-          }
-          return this.tryAcquireCore(retryCtx, acquireStart);
-        },
-        options?.signal,
+    // The type rules this out, but a strategy written in JavaScript against
+    // the old contract resolved `undefined` to refuse, or the allotment
+    // itself to grant.
+    if (result === undefined || !("ok" in result)) {
+      throw new TypeError(
+        "AllotmentUnavailableStrategy.onAllotmentUnavailable must resolve with { ok: true, value } or { ok: false, error }.",
       );
+    }
 
-      // If we still don't have an allotment, record the acquire time as unavailable.
-      if (!result) {
-        void recordFinalAcquireFailed();
-        return undefined;
-      }
-
-      // If the rejection strategy acquired via retry just before the signal
-      // aborted, return the caller's capacity to the limiter.
-      if (options?.signal?.aborted) {
-        await result.releaseAndIgnore();
-        return undefined;
-      }
-
+    if (!result.ok) {
+      recordFinalAcquireFailed();
       return result;
     }
 
-    // same idea as above: here, we did acquire, so we need to try to cleanup.
-    if (options?.signal?.aborted) {
-      await allotment.releaseAndIgnore();
-      return undefined;
-    }
+    return this.keepUnlessAborted(result.value, signal);
+  }
 
-    return allotment;
+  /**
+   * Returns `allotment`, unless the caller's signal aborted while the
+   * limiter got it. Then it returns the capacity to the limiter, and throws
+   * the signal's reason.
+   */
+  private async keepUnlessAborted(
+    allotment: LimitAllotment,
+    signal: AbortSignal | undefined,
+  ): AcquireResult {
+    if (signal?.aborted) {
+      await allotment.releaseAndIgnore();
+      throw signal.reason;
+    }
+    return { ok: true, value: allotment };
   }
 
   private async tryAcquireCore(
     ctx: Context,
     acquireStart: number,
-  ): AcquireResult {
+  ): Promise<LimitAllotment | undefined> {
     const reservation = await this.acquireStrategy.tryReserveAllotment(ctx, {
       limit: this._limit,
       inflight: this._inflight,
@@ -582,7 +619,7 @@ export class Limiter<
     let releaseStarted = false;
 
     return {
-      releaseAndRecordSuccess: async () => {
+      releaseAndRecordSuccess: async (weight?: number) => {
         if (releaseStarted) return;
         releaseStarted = true;
         const endTime = this.safeReadClockWithFallback(undefined);
@@ -629,6 +666,7 @@ export class Limiter<
                 currentInflight,
                 false,
                 operationName,
+                weight,
               );
             }
           }
@@ -666,7 +704,7 @@ export class Limiter<
           await this.rejectionStrategy?.onAllotmentReleased();
         } catch {}
       },
-      releaseAndRecordDropped: async () => {
+      releaseAndRecordDropped: async (weight?: number) => {
         if (releaseStarted) return;
         releaseStarted = true;
 
@@ -693,6 +731,7 @@ export class Limiter<
             currentInflight,
             true,
             operationName,
+            weight,
           );
         } catch {}
         try {

@@ -1,4 +1,6 @@
 import type { AllotmentReservation } from "../AllotmentReservation.js";
+import type { allotmentUnavailableError } from "../errors.js";
+import type { Limiter } from "../Limiter.js";
 import type { MaybePromise } from "./MaybePromise.js";
 
 /**
@@ -15,8 +17,12 @@ export type LimitAllotment = {
   /**
    * The operation succeeded and internally measured latency should be used as
    * an RTT sample.
+   *
+   * @param weight Optional amount of work that the operation represented,
+   *   for example the number of items in a batch call. It is passed to the
+   *   limit algorithm's `addSample`.
    */
-  releaseAndRecordSuccess(): Promise<void>;
+  releaseAndRecordSuccess(weight?: number): Promise<void>;
 
   /**
    * The operation failed before any meaningful RTT measurement could be made
@@ -28,8 +34,12 @@ export type LimitAllotment = {
    * The request failed and was dropped due to being rejected by an external
    * limit or hitting a timeout. Loss based StreamingLimit implementations will
    * likely do an aggressive reduction in limit when this happens.
+   *
+   * @param weight Optional amount of work that the operation represented,
+   *   for example the number of items in a batch call. It is passed to the
+   *   limit algorithm's `addSample`.
    */
-  releaseAndRecordDropped(): Promise<void>;
+  releaseAndRecordDropped(weight?: number): Promise<void>;
 };
 
 export type AcquireOptions<ContextT = void> = {
@@ -37,7 +47,37 @@ export type AcquireOptions<ContextT = void> = {
   signal?: AbortSignal | undefined;
 };
 
-export type AcquireResult = Promise<LimitAllotment | undefined>;
+/**
+ * An expected outcome that can fail: `{ ok: true, value }`, or
+ * `{ ok: false, error }`. The package uses it where a failure is a normal
+ * outcome under load, which the caller must handle, not an exception.
+ */
+export type Result<T, E = Error> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: E };
+
+/**
+ * The result of {@link Limiter.acquire}, and of an
+ * {@link AllotmentUnavailableStrategy}.
+ *
+ * - It resolves with `{ ok: true, value }`, where `value` is the allotment.
+ * - It resolves with `{ ok: false, error }` when the limiter gives no
+ *   allotment. `error` is an {@link allotmentUnavailableError}.
+ * - It rejects with the signal's `reason` when the caller's signal aborts
+ *   first, and with any error that a strategy, the clock, or another
+ *   callback throws.
+ */
+export type AcquireResult = Promise<Result<LimitAllotment>>;
+
+/**
+ * One more attempt to get an allotment, which an
+ * {@link AllotmentUnavailableStrategy} calls while it waits. It resolves with
+ * `undefined` when the acquire strategy still refuses: that is not a final
+ * answer, so the waiting strategy decides what to do next.
+ */
+export type RetryAcquire<ContextT> = (
+  context: ContextT,
+) => Promise<LimitAllotment | undefined>;
 
 /**
  * Read-only view of the limiter's current state, provided to strategies so
@@ -100,6 +140,13 @@ export type AcquireStrategy<ContextT> = {
  * {@link AcquireStrategy} (e.g. queue the caller, reject immediately, or block
  * until a slot is available). Implementations must return an
  * {@link AcquireResult}, which is always a `Promise`.
+ *
+ * When the strategy gets an allotment, it resolves with `{ ok: true, value }`.
+ * When it gives up, it resolves with `{ ok: false, error }`, where `error` is
+ * an {@link allotmentUnavailableError}. The strategy makes the error, so it
+ * can state what it knows: a `retryAfter` when it knows when capacity
+ * returns, or a different `load`. When the caller's signal aborts, it rejects
+ * with the signal's `reason`.
  */
 export type AllotmentUnavailableStrategy<ContextT> = {
   /**
@@ -111,12 +158,13 @@ export type AllotmentUnavailableStrategy<ContextT> = {
    *   expected to call later if/when a slot might have opened up. The retry
    *   runs {@link AcquireStrategy.tryReserveAllotment} and, if it grants,
    *   commits the reservation and returns a ready-to-use allotment with all
-   *   required wrapping.
+   *   required wrapping. It resolves with `undefined` if the acquire
+   *   strategy still refuses.
    * @param signal Optional abort signal from the caller.
    */
   onAllotmentUnavailable(
     context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
+    retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
   ): AcquireResult;
 
