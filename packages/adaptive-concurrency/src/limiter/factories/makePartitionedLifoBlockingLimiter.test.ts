@@ -132,6 +132,44 @@ describe("makePartitionedLifoBlockingLimiter", () => {
       /Timeout cannot be greater than/,
     );
   });
+
+  it("serves a waiter whose partition has room when the head waiter's partition is full", async () => {
+    // Each partition may hold 1 allotment (burst "none", 50% of 2).
+    const limiter = makePartitionedLifoBlockingLimiter<string>({
+      backlogTimeout: 1_000,
+      limiter: { limit: new FixedLimit(2) },
+      partitionResolver: (ctx) => ctx,
+      partitions: {
+        a: { percent: 0.5, burstMode: { kind: "none" } },
+        b: { percent: 0.5, burstMode: { kind: "none" } },
+      },
+    });
+
+    const a1 = await acquireOk(limiter, { context: "a" });
+    const b1 = await acquireOk(limiter, { context: "b" });
+
+    // LIFO: the waiter for a joins last, so it is at the head of the backlog.
+    const b2Waiting = limiter.acquire({ context: "b" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const a2Waiting = limiter.acquire({ context: "a" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Free b's slot. a is still full, so the waiter for a cannot use it,
+    // but the waiter for b can.
+    const start = performance.now();
+    await b1.releaseAndRecordSuccess();
+    const b2 = await b2Waiting;
+    const elapsed = performance.now() - start;
+
+    assert.ok(b2.ok, "expected the waiter for b to get an allotment");
+    assert.ok(elapsed < 200, `expected a prompt allotment, waited ${elapsed}ms`);
+
+    await b2.value.releaseAndRecordSuccess();
+    await a1.releaseAndRecordSuccess();
+    const a2 = await a2Waiting;
+    assert.ok(a2.ok);
+    await a2.value.releaseAndRecordSuccess();
+  });
 });
 
 async function acquireOk<C>(
