@@ -101,12 +101,12 @@ Semantics are equivalent: exactly one completion method should be called.
 
 ### `Limiter` interface -> `Limiter` class
 
-| Java                                   | TypeScript                                                |
-| -------------------------------------- | --------------------------------------------------------- |
-| functional interface                   | concrete class                                            |
-| `acquire(context): Optional<Listener>` | `acquire(options?): Promise<LimitAllotment \| undefined>` |
-| rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                 |
-| context passed positionally            | options object (`{ context, signal? }`)                   |
+| Java                                   | TypeScript                                                                               |
+| -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| functional interface                   | concrete class                                                                           |
+| `acquire(context): Optional<Listener>` | `acquire(options?): Promise<Result<LimitAllotment>>` (`{ ok: false, error }` when empty) |
+| rejection via `Optional.empty()`       | rejection via `undefined` (sync or async)                                                |
+| context passed positionally            | options object (`{ context, signal? }`)                                                  |
 
 TypeScript `AcquireOptions` adds `signal?: AbortSignal`.
 
@@ -130,7 +130,7 @@ No direct Java equivalent.
 
 - `withLimiter(limiter)` creates `limited`, then call `limited(fn)` or `limited(options, fn)` to acquire and scope execution.
 - Callback returns `RunResult` `success(value)`/`ignore(value)`, and dropped outcomes are signaled by throwing `dropped(error)`. Throwing an unwrapped error is shorthand for throwing `ignore(error)`.
-- If no allotment is available, returns `QuotaNotAvailable` and does not invoke `fn`.
+- If no allotment is available, resolves with `{ ok: false, error }` and does not invoke `fn`. Otherwise resolves with `{ ok: true, value }`.
 - Callback receives `{ context, signal }` from `AcquireOptions`.
 - If `fn` throws/rejects unexpectedly, `limited()` calls `releaseAndIgnore()` and rethrows, except `AdaptiveTimeoutError` and `AdaptiveRejectionError`, which are treated as dropped (`releaseAndRecordDropped()`) and rethrown.
 
@@ -160,7 +160,7 @@ Default adaptive limit selection is centralized in `Limiter.makeDefaultLimit()`,
 - `partitionResolver` is a single function; ordered fallback is left to the caller.
 - `PartitionedStrategy` accepts a second type parameter `PartitionName` (default `string`) so `partitions`, the resolver return type, and `getPartition`’s `name` can be narrowed (e.g. `"read" | "write"`).
 - Unknown partition behavior is retained.
-- Partition shares differ from Java's `max(1, ceil(limit * percent))`. The global limit is split by the largest-remainder method, so shares never sum above the limit and can be 0. Ties go to the partition declared first.
+- Partition shares differ from Java's `max(1, ceil(limit * percent))`. The global limit is split by the largest-remainder method, so shares never sum above the limit and can be 0. Ties go to the partition that comes first in the enumeration order of `partitions`: insertion order, except that integer-like names come first in ascending order.
 - `PartitionConfig` has required **`percent`** plus optional **`burstMode`** (`unbounded` default, `capped`, or `none`) for below-saturation bursting policy.
 - Java-style **sleep-then-reject** is not a `PartitionConfig` field; use **`DelayedRejectStrategy`** with `delayMsForContext` keyed by your partition mapping.
 - Factory helpers (`makePartitionedLimiter`, `makePartitionedBlockingLimiter`, `makePartitionedLifoBlockingLimiter`) add a convenience `delayMs` field per partition (`PartitionConfig & { delayMs?: number }`) and wire it to `DelayedRejectStrategy`.
@@ -207,7 +207,7 @@ Additional details:
 - `LinkedWaiterQueue` now acts as a priority queue; `enqueueOptions.priority` can be used to prioritize queued waiters (higher priority is served first).
 - Both strategies react to limit increases (`onLimitChanged`) by scheduling a backlog drain, so queued callers can be served without waiting for another release event.
 - Enqueuing a waiter also schedules a coalesced opportunistic drain. This prevents lost wakeups when a release happens between a failed acquire attempt and the caller being fully enqueued. Drains are serialized (`drainInProgress`) and retry only the current queue head; a release that happens during an in-flight retry is remembered and causes the loop to retry rather than losing capacity.
-- `DelayedRejectStrategy`: awaits a delay then returns no allotment (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
+- `DelayedRejectStrategy`: awaits a delay then gives no allotment (does not call `retry`); unlike blocking strategies, it does not wait for capacity.
 - `DelayedThenBlockingRejection`: runs delayed rejection first, then retries once, and if still unavailable delegates to configured blocking strategy.
 
 ### Java-style builder wrappers -> TS factory helpers
@@ -296,7 +296,7 @@ All algorithm time inputs/options in TypeScript use milliseconds (not Java nanos
 Java's `BlockingAdaptiveExecutor` has no direct TypeScript class equivalent now. Its role is covered by `withLimiter(limiter)`:
 
 - Java `execute(Runnable)` style maps to wrapping your async work in `withLimiter(limiter)`.
-- Acquire failures are represented by `QuotaNotAvailable` (instead of executor-specific rejection exceptions).
+- Acquire failures are represented by an `{ ok: false, error }` result, where `error` is an `allotmentUnavailableError` (instead of executor-specific rejection exceptions).
 - Drop signaling can be done by throwing `dropped(err)` or by throwing `AdaptiveTimeoutError` or `AdaptiveRejectionError`. Non-drop throws are ignore semantics (equivalent to throwing `ignore(err)`).
 - No JVM thread-pool abstraction is provided in core TypeScript APIs.
 
@@ -376,7 +376,7 @@ Java servlet helpers without direct built-in equivalents (e.g. parameter/attribu
 - `withLimiter(limiter)`
 - `RunResult` + `success/ignore/dropped`
 - `GroupAwareLimit` — mix-agnostic limit algorithm with per-group RTT baselines
-- `QuotaNotAvailable` sentinel
+- `allotmentUnavailableError`, annotated with `@zingage/errors`, and the `{ ok, value | error }` result of `withLimiter`
 - `LimiterState` strategy input
 - `AcquireStrategy` / `AllotmentUnavailableStrategy` public extension points
 - `AllotmentReservation` two-phase strategy receipt

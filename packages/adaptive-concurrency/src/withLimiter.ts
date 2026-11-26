@@ -4,14 +4,13 @@ import type { Limiter } from "./Limiter.js";
 import {
   isAdaptiveDropError,
   isRunResult,
-  QuotaNotAvailable,
   type AdaptiveRejectionError,
   type AdaptiveTimeoutError,
   type RunIgnore,
   type RunResult,
   type RunSuccess,
 } from "./RunResult.js";
-import type { AcquireOptions } from "./types/Strategy.js";
+import type { AcquireOptions, Result } from "./types/Strategy.js";
 
 export type RunCallbackArgs<ContextT> = {
   context: ContextT | undefined;
@@ -29,19 +28,23 @@ type FunctionToLimit<ContextT, T> = (
 ) => T | ReturnableRunResult<T> | Promise<T | ReturnableRunResult<T>>;
 
 export type CallWithLimiter<ContextT> = {
-  <T>(fn: FunctionToLimit<ContextT, T>): Promise<T | typeof QuotaNotAvailable>;
+  <T>(fn: FunctionToLimit<ContextT, T>): Promise<Result<T>>;
 
   <T>(
     options: AcquireOptions<ContextT>,
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable>;
+  ): Promise<Result<T>>;
 };
 
 /**
  * Creates a helper that runs callbacks under acquired limiter allotments.
  *
- * - If {@link Limiter.acquire} yields no allotment, returns
- *   {@link QuotaNotAvailable} without invoking `fn`.
+ * - If {@link Limiter.acquire} gives no allotment, resolves with its
+ *   `{ ok: false, error }` without invoking `fn`. `error` is an
+ *   `allotmentUnavailableError`. If `acquire` rejects, for example with the
+ *   signal's reason after an abort, the returned promise rejects too.
+ * - Otherwise resolves with `{ ok: true, value }`, where `value` is the
+ *   value described below.
  * - If callback returns a {@link RunResult} `success` / `ignore`, returns the
  *   carried value after recording success/ignore to the allotment. If the
  *   callback returns a non-{@link RunResult} value, it is treated as implicit
@@ -58,15 +61,15 @@ export function withLimiter<ContextT>(
 ): CallWithLimiter<ContextT> {
   async function callWithLimiter<T>(
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable>;
+  ): Promise<Result<T>>;
   async function callWithLimiter<T>(
     options: AcquireOptions<ContextT>,
     fn: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable>;
+  ): Promise<Result<T>>;
   async function callWithLimiter<T>(
     optionsOrFn: AcquireOptions<ContextT> | FunctionToLimit<ContextT, T>,
     maybeFn?: FunctionToLimit<ContextT, T>,
-  ): Promise<T | typeof QuotaNotAvailable> {
+  ): Promise<Result<T>> {
     const [options, fn] =
       typeof optionsOrFn === "function"
         ? [undefined, optionsOrFn]
@@ -76,10 +79,11 @@ export function withLimiter<ContextT>(
       throw new Error("No function provided");
     }
 
-    const allotment = await limiter.acquire(options);
-    if (!allotment) {
-      return QuotaNotAvailable;
+    const acquired = await limiter.acquire(options);
+    if (!acquired.ok) {
+      return acquired;
     }
+    const allotment = acquired.value;
 
     try {
       const allotmentOutcome = await Promise.resolve()
@@ -148,13 +152,13 @@ export function withLimiter<ContextT>(
             IsEqual<typeof allotmentOutcome.kind, "return">,
             true
           >;
-          return allotmentOutcome.value;
+          return { ok: true, value: allotmentOutcome.value };
         case "ignore":
           await allotment.releaseAndIgnore();
           if (allotmentOutcome.kind === "throw") {
             throw allotmentOutcome.value;
           } else {
-            return allotmentOutcome.value;
+            return { ok: true, value: allotmentOutcome.value };
           }
         case "drop":
           await allotment.releaseAndRecordDropped();
@@ -179,7 +183,7 @@ export function withLimiter<ContextT>(
 export function makeLimitedFunction<ContextT, T>(
   limiter: Limiter<ContextT>,
   fn: FunctionToLimit<ContextT, T>,
-): (opts?: AcquireOptions<ContextT>) => Promise<T | typeof QuotaNotAvailable> {
+): (opts?: AcquireOptions<ContextT>) => Promise<Result<T>> {
   const callWithLimiter = withLimiter(limiter);
   return (options?: AcquireOptions<ContextT>) =>
     options ? callWithLimiter(options, fn) : callWithLimiter(fn);

@@ -1,7 +1,7 @@
 import type {
   AcquireResult,
   AllotmentUnavailableStrategy,
-  LimitAllotment,
+  RetryAcquire,
 } from "../../types/Strategy.js";
 import type { DelayedRejectStrategy } from "./DelayedRejectStrategy.js";
 
@@ -26,22 +26,17 @@ export class DelayedThenBlockingRejection<
 
   async onAllotmentUnavailable(
     context: ContextT,
-    retry: (context: ContextT) => AcquireResult,
+    retry: RetryAcquire<ContextT>,
     signal?: AbortSignal,
-  ): Promise<LimitAllotment | undefined> {
-    await this.delayStrategy.onAllotmentUnavailable(context, retry, signal);
-    if (signal?.aborted) {
-      return undefined;
-    }
+  ): AcquireResult {
+    await this.delayStrategy.delay(context, signal);
     const allotment = await retry(context);
 
     if (allotment) {
-      return allotment;
+      return { ok: true, value: allotment };
     }
 
-    if (signal?.aborted) {
-      return undefined;
-    }
+    signal?.throwIfAborted();
 
     return this.blockingStrategy.onAllotmentUnavailable(context, retry, signal);
   }

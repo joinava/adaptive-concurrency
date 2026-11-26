@@ -15,6 +15,12 @@ import {
   type Gauge,
   type MetricRegistry,
 } from "../../MetricRegistry.js";
+import { isAllotmentUnavailableError } from "../../errors.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "../../types/Strategy.js";
 
 function makeRecordingRegistry(): {
   registry: MetricRegistry;
@@ -62,6 +68,20 @@ function makePartitionedLimiter<
   });
 }
 
+/**
+ * Acquires an allotment, or returns `undefined` when the limiter gives none.
+ * For tests that count how many acquires a limiter admits.
+ */
+async function acquireOrUndefined<ContextT>(
+  limiter: Limiter<ContextT>,
+  options: AcquireOptions<ContextT>,
+): Promise<LimitAllotment | undefined> {
+  const result = await limiter.acquire(options);
+  if (result.ok) return result.value;
+  assert.ok(isAllotmentUnavailableError(result.error));
+  return undefined;
+}
+
 describe("PartitionedStrategy", () => {
   it("should allocate limits to partitions based on percentage", async () => {
     const limiter = makePartitionedLimiter<string>({
@@ -75,7 +95,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -94,7 +114,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -120,7 +140,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -144,7 +164,7 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOrUndefined(limiter, { context: "a" });
       if (l) listeners.push(l);
     }
 
@@ -168,27 +188,23 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 3; i++) {
-      const l = await limiter.acquire({ context: "a" });
+      const l = await acquireOk(limiter, { context: "a" });
       assert.ok(l, `Should acquire a[${i}]`);
       listeners.push(l!);
     }
     for (let i = 0; i < 7; i++) {
-      const l = await limiter.acquire({ context: "b" });
+      const l = await acquireOk(limiter, { context: "b" });
       assert.ok(l, `Should acquire b[${i}]`);
       listeners.push(l!);
     }
 
-    const extraA = await limiter.acquire({ context: "a" });
-    assert.equal(
-      extraA,
-      undefined,
+    await assertUnavailable(
+      limiter.acquire({ context: "a" }),
       "Should reject a when its partition limit is reached",
     );
 
-    const extraB = await limiter.acquire({ context: "b" });
-    assert.equal(
-      extraB,
-      undefined,
+    await assertUnavailable(
+      limiter.acquire({ context: "b" }),
       "Should reject b when its partition limit is reached",
     );
   });
@@ -203,15 +219,15 @@ describe("PartitionedStrategy", () => {
       },
     });
 
-    const l1 = (await limiter.acquire({ context: "a" }))!;
-    const l2 = (await limiter.acquire({ context: "b" }))!;
+    const l1 = await acquireOk(limiter, { context: "a" });
+    const l2 = await acquireOk(limiter, { context: "b" });
     assert.ok(l1 && l2);
 
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assertUnavailable(limiter.acquire({ context: "a" }));
 
     await l1.releaseAndRecordSuccess();
 
-    const l3 = await limiter.acquire({ context: "a" });
+    const l3 = await acquireOk(limiter, { context: "a" });
     assert.ok(l3, "Should acquire after release");
   });
 
@@ -228,14 +244,16 @@ describe("PartitionedStrategy", () => {
 
     const listeners = [];
     for (let i = 0; i < 10; i++) {
-      const l = await limiter.acquire({ context: i % 2 === 0 ? "a" : "b" });
+      const l = await acquireOrUndefined(limiter, {
+        context: i % 2 === 0 ? "a" : "b",
+      });
       if (l) listeners.push(l);
     }
     assert.equal(listeners.length, 10);
 
     limit.setLimit(20);
 
-    const extra = await limiter.acquire({ context: "a" });
+    const extra = await acquireOk(limiter, { context: "a" });
     assert.ok(extra, "Should acquire after limit increase");
   });
 
@@ -249,12 +267,12 @@ describe("PartitionedStrategy", () => {
       bypassResolver: (ctx) => ctx === "bypass",
     });
 
-    const l1 = (await limiter.acquire({ context: "a" }))!;
+    const l1 = await acquireOk(limiter, { context: "a" });
     assert.ok(l1);
 
-    assert.equal(await limiter.acquire({ context: "a" }), undefined);
+    await assertUnavailable(limiter.acquire({ context: "a" }));
 
-    const bypass = await limiter.acquire({ context: "bypass" });
+    const bypass = await acquireOk(limiter, { context: "bypass" });
     assert.ok(bypass, "Bypass should work when limit exceeded");
   });
 
@@ -298,6 +316,13 @@ describe("PartitionedStrategy", () => {
       assert.deepEqual(apportionGlobalLimit(10, [0.3, 0.7]), [3, 7]);
       assert.deepEqual(apportionGlobalLimit(10, [0.1, 0.2]), [1, 2]);
       assert.deepEqual(apportionGlobalLimit(3, [0.1, 0.1, 0.1]), [0, 0, 0]);
+    });
+
+    it("gives a tie to the lower index when remainders differ only by float error", () => {
+      // 4 * 0.6 - 2 is 0.3999999999999999 and 4 * 0.1 is 0.4, but the
+      // remainders are equal, so the first partition wins the tie.
+      assert.deepEqual(apportionGlobalLimit(4, [0.6, 0.3, 0.1]), [3, 1, 0]);
+      assert.deepEqual(apportionGlobalLimit(4, [0.1, 0.3, 0.6]), [1, 1, 2]);
     });
 
     it("leaves unassigned the part of the limit that no partition claims", () => {
@@ -361,7 +386,7 @@ describe("PartitionedStrategy", () => {
 
       for (const context of ["interactive", "background", "bulk", "other"]) {
         assert.equal(
-          await limiter.acquire({ context }),
+          await acquireOrUndefined(limiter, { context }),
           undefined,
           `${context} must be rejected at a global limit of 0`,
         );
@@ -376,17 +401,25 @@ describe("PartitionedStrategy", () => {
       });
 
       // An idle limiter lets a low-priority partition use the one slack slot.
-      const bulk = await limiter.acquire({ context: "bulk" });
+      const bulk = await acquireOrUndefined(limiter, { context: "bulk" });
       assert.ok(bulk, "bulk may use the slack slot, though its share is 0");
 
       // At saturation, only a partition with a nonzero share is admitted.
-      const interactive = await limiter.acquire({ context: "interactive" });
+      const interactive = await acquireOrUndefined(limiter, {
+        context: "interactive",
+      });
       assert.ok(
         interactive,
         "interactive's share of 1 admits it at saturation",
       );
-      assert.equal(await limiter.acquire({ context: "background" }), undefined);
-      assert.equal(await limiter.acquire({ context: "bulk" }), undefined);
+      assert.equal(
+        await acquireOrUndefined(limiter, { context: "background" }),
+        undefined,
+      );
+      assert.equal(
+        await acquireOrUndefined(limiter, { context: "bulk" }),
+        undefined,
+      );
     });
 
     it("gives a share-0 partition one slot of slack in every burst mode", async () => {
@@ -403,14 +436,27 @@ describe("PartitionedStrategy", () => {
           },
         });
 
-        const first = await limiter.acquire({ context: "minor" });
+        const first = await acquireOrUndefined(limiter, { context: "minor" });
         assert.ok(first, `${burstMode.kind}: minor gets one slack slot`);
         assert.equal(
-          await limiter.acquire({ context: "minor" }),
+          await acquireOrUndefined(limiter, { context: "minor" }),
           undefined,
           `${burstMode.kind}: minor gets only one slack slot`,
         );
       }
+    });
+
+    it("breaks ties in the enumeration order of partitions, not their declaration order", async () => {
+      // JavaScript enumerates integer-like keys first, in ascending order, so
+      // "1" comes before "2" although "2" is declared first.
+      const strategy = new PartitionedStrategy<string>({
+        initialLimit: 1,
+        partitionResolver: (ctx) => ctx,
+        partitions: { "2": { percent: 0.5 }, "1": { percent: 0.5 } },
+      });
+
+      assert.equal(strategy.getPartition("1")?.limitAtGlobalSaturation, 1);
+      assert.equal(strategy.getPartition("2")?.limitAtGlobalSaturation, 0);
     });
 
     it("caps a capped burst from the unrounded share", async () => {
@@ -428,7 +474,9 @@ describe("PartitionedStrategy", () => {
 
       const acquired = [];
       for (let i = 0; i < 10; i++) {
-        const allotment = await limiter.acquire({ context: "minor" });
+        const allotment = await acquireOrUndefined(limiter, {
+          context: "minor",
+        });
         if (allotment) acquired.push(allotment);
       }
 
@@ -559,3 +607,21 @@ describe("PartitionedStrategy", () => {
     });
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(
+  acquired: AcquireResult,
+  message?: string,
+): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false, message);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

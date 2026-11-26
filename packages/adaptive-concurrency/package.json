@@ -9,7 +9,7 @@
     "dynamic rate limiting"
   ],
   "author": "Ethan Resnick <ethan.resnick@gmail.com>",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "type": "module",
   "exports": {
     ".": {
@@ -25,8 +25,12 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "prepublishOnly": "pnpm build"
   },
+  "peerDependencies": {
+    "@zingage/errors": "^1.1.0"
+  },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "@zingage/errors": "^1.1.0",
     "tsx": "^4.19.0",
     "type-fest": "^5.5.0",
     "type-party": "^0.7.3",

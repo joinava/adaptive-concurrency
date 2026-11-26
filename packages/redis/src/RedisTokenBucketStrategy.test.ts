@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   AllotmentReservation,
+  BlockingBacklogRejection,
+  isAllotmentUnavailableError,
   Limiter,
+  LinkedWaiterQueue,
   PartitionedStrategy,
   SemaphoreStrategy,
   SettableLimit,
@@ -14,6 +17,11 @@ import {
   type RedisTokenBucketClient,
 } from "./RedisTokenBucket.js";
 import { RedisTokenBucketStrategy } from "./RedisTokenBucketStrategy.js";
+import type {
+  AcquireOptions,
+  AcquireResult,
+  LimitAllotment,
+} from "adaptive-concurrency";
 
 /**
  * Acquire-script return shape. `[1, 0]` = granted; `[0, waitMs]` = denied.
@@ -27,7 +35,11 @@ type AcquireResponse = [1, 0] | [0, number];
  */
 type RefundResponse = 0 | 1;
 
-type ScriptedResponse = AcquireResponse | RefundResponse;
+/**
+ * An `Error` in the script makes that one call reject, so a test can simulate
+ * a transient Redis failure between successful calls.
+ */
+type ScriptedResponse = AcquireResponse | RefundResponse | Error;
 
 /**
  * Mock client whose `evalSha` ignores the actual script and returns whatever
@@ -69,7 +81,9 @@ function makeMockClient(options: {
       if (responses.length === 0) {
         throw new Error("Mock client out of scripted responses");
       }
-      return responses.shift();
+      const response = responses.shift();
+      if (response instanceof Error) throw response;
+      return response;
     },
   };
 }
@@ -719,6 +733,58 @@ describe("RedisTokenBucketStrategy", () => {
       // touching Redis at all.
       assert.equal(errors.length, 1);
     });
+
+    // A failed acquire does not say whether the script ran, so the strategy
+    // must not refund. Redis is back for the next call, so a refund would
+    // reach the bucket and add a token it may never have lost.
+    for (const transition of ["commit-throw", "cancel"] as const) {
+      it(`does not refund a fail-open grant on ${transition}`, async () => {
+        const client = makeMockClient({
+          responses: [
+            new Error("ETIMEDOUT"), // tryAcquire fails open
+            1, // a refund, if one were sent, would succeed
+          ],
+        });
+        const bucket = new RedisTokenBucket(client, {
+          keyPrefix: "test",
+          maxTokens: 5,
+          refillIntervalMs: 1000,
+        });
+        const commitError = new Error("commit exploded");
+        const inner = makeInnerStub<string>({
+          reserveResults: [true],
+          ...(transition === "commit-throw"
+            ? { commitThrows: commitError }
+            : {}),
+        });
+        const strategy = new RedisTokenBucketStrategy<string>({
+          bucket,
+          inner: inner.strategy,
+        });
+
+        const reservation = await strategy.tryReserveAllotment(
+          "ctx",
+          fakeState,
+        );
+        assert.ok(reservation, "the bucket fails open, so the inner grants");
+
+        if (transition === "commit-throw") {
+          await assert.rejects(
+            async () => await reservation.commit(),
+            commitError,
+          );
+        } else {
+          await reservation.cancel();
+          assert.deepEqual(inner.cancelCalls, ["ctx"]);
+        }
+
+        assert.equal(
+          client.evalShaCalls.length,
+          1,
+          "only the failed acquire reached Redis; no refund was sent",
+        );
+      });
+    }
   });
 
   describe("integration with SemaphoreStrategy", () => {
@@ -744,14 +810,13 @@ describe("RedisTokenBucketStrategy", () => {
         }),
       });
 
-      const a = await limiter.acquire();
-      const b = await limiter.acquire();
+      const a = await acquireOk(limiter);
+      const b = await acquireOk(limiter);
       assert.ok(a && b, "first two acquires use the local permits");
       assert.equal(client.evalShaCalls.length, 2);
 
-      assert.equal(
-        await limiter.acquire(),
-        undefined,
+      await assertUnavailable(
+        limiter.acquire(),
         "third acquire rejected by the semaphore before Redis is consulted",
       );
       assert.equal(
@@ -782,17 +847,85 @@ describe("RedisTokenBucketStrategy", () => {
         }),
       });
 
-      assert.equal(
-        await limiter.acquire(),
-        undefined,
+      await assertUnavailable(
+        limiter.acquire(),
         "bucket denies → semaphore reservation is cancelled, permit returned",
       );
-      const allotment = await limiter.acquire();
+      const allotment = await acquireOk(limiter);
       assert.ok(
         allotment,
         "the local semaphore still has its permit available for the next bucket grant",
       );
       assert.equal(client.evalShaCalls.length, 2);
+    });
+
+    it("wakes a queued waiter when a bucket denial frees the semaphore slot", async () => {
+      // Each acquire-script call waits until the test answers it. Refunds
+      // are answered at once.
+      const answers: Array<(response: AcquireResponse) => void> = [];
+      const client: RedisTokenBucketClient = {
+        async scriptLoad() {
+          return "fake-sha";
+        },
+        async evalSha(_sha, args) {
+          if (args.arguments.length === 2) return 1; // refund
+          return new Promise<AcquireResponse>((resolve) => {
+            answers.push(resolve);
+          });
+        },
+      };
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 100,
+        refillIntervalMs: 1000,
+      });
+      const limiter = new Limiter<string>({
+        limit: new SettableLimit(1),
+        acquireStrategy: new RedisTokenBucketStrategy<string>({
+          bucket,
+          inner: new SemaphoreStrategy(1),
+          keyResolver: (tenant) => tenant,
+        }),
+        // A backlog of one: B fills it, so A's denied acquire does not queue
+        // (and so does not start a drain of its own).
+        allotmentUnavailableStrategy: new BlockingBacklogRejection<
+          string,
+          object
+        >({
+          backlogSize: 1,
+          backlogTimeout: 200,
+          enqueueOptions: { direction: "back" },
+          queue: new LinkedWaiterQueue(),
+        }),
+      });
+      const flush = async () => {
+        for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+      };
+
+      // A reserves the only semaphore slot and waits on its bucket.
+      const a = limiter.acquire({ context: "tenant-a" });
+      await flush();
+      assert.equal(answers.length, 1);
+
+      // B finds the slot reserved and queues; its first retry fails too.
+      const b = limiter.acquire({ context: "tenant-b" });
+      await flush();
+
+      // A's bucket denies, so the strategy cancels A's semaphore reservation.
+      answers.shift()!([0, 100]);
+      await assertUnavailable(a);
+      await flush();
+
+      // B is retried, reaches its own bucket, and gets the slot.
+      assert.equal(
+        answers.length,
+        1,
+        "B was not retried after A freed the slot",
+      );
+      answers.shift()!([1, 0]);
+      const result = await b;
+      assert.ok(result.ok, "B should get the slot that A's denial freed");
+      await result.value.releaseAndRecordSuccess();
     });
   });
 
@@ -845,15 +978,17 @@ describe("RedisTokenBucketStrategy", () => {
         }),
       });
 
-      const denied = await limiter.acquire({ context: "a" });
-      assert.equal(denied, undefined, "bucket denies the first acquire");
+      await assertUnavailable(
+        limiter.acquire({ context: "a" }),
+        "bucket denies the first acquire",
+      );
       assert.deepEqual(
         inflightSamples,
         [],
         "bucket denial must not emit any inflight distribution sample for the partition",
       );
 
-      const granted = await limiter.acquire({ context: "a" });
+      const granted = await acquireOk(limiter, { context: "a" });
       assert.ok(granted, "bucket grants the second acquire");
       assert.deepEqual(
         inflightSamples,
@@ -891,7 +1026,7 @@ describe("RedisTokenBucketStrategy", () => {
         }),
       });
 
-      const okA = await limiter.acquire({ context: "a" });
+      const okA = await acquireOk(limiter, { context: "a" });
       assert.ok(okA, "partition a admitted by both gates");
       assert.deepEqual(client.evalShaCalls.at(-1)?.keys, ["test:a"]);
       assert.equal(
@@ -900,16 +1035,36 @@ describe("RedisTokenBucketStrategy", () => {
         "partition a's inflight is incremented",
       );
 
-      const deniedB = await limiter.acquire({ context: "b" });
-      assert.equal(deniedB, undefined, "partition b denied by the bucket");
+      await assertUnavailable(
+        limiter.acquire({ context: "b" }),
+        "partition b denied by the bucket",
+      );
       assert.equal(
         partitioned.getPartition("b")?.inFlight,
         0,
         "partition b's reservation was returned after the bucket denial",
       );
 
-      const okB = await limiter.acquire({ context: "b" });
+      const okB = await acquireOk(limiter, { context: "b" });
       assert.ok(okB, "partition b admitted on retry");
     });
   });
 });
+
+async function acquireOk<C>(
+  limiter: { acquire(options?: AcquireOptions<C>): AcquireResult },
+  options?: AcquireOptions<C>,
+): Promise<LimitAllotment> {
+  const result = await limiter.acquire(options);
+  assert.ok(result.ok, "expected an allotment");
+  return result.value;
+}
+
+async function assertUnavailable(
+  acquired: AcquireResult,
+  message?: string,
+): Promise<void> {
+  const result = await acquired;
+  assert.equal(result.ok, false, message);
+  assert.ok(isAllotmentUnavailableError(result.error));
+}

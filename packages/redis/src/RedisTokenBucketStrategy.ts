@@ -44,12 +44,16 @@ import type { RedisTokenBucket } from "./RedisTokenBucket.js";
  *
  * - If Redis is unavailable, the underlying {@link RedisTokenBucket} degrades
  *   gracefully (treats `tryAcquire` as granted, silently drops `refund`), so
- *   this strategy effectively falls back to inner-only behavior.
+ *   this strategy effectively falls back to inner-only behavior. A grant that
+ *   failed open reports `debited: false`, and the strategy never refunds it:
+ *   the bucket does not know whether a token was taken, and a refund could
+ *   add a token that was never lost.
  *
  * - **Inner `cancel()` throws while the bucket denies.** Here the strategy is
  *   rejecting, so it returns `undefined` and the caller never receives a
  *   reservation. It cannot learn that the inner leaked a permit, and throwing
- *   instead would turn a bucket denial into a thrown `acquire()`. So the error
+ *   instead would make `acquire()` reject with the inner's error, not with
+ *   the `allotmentUnavailableError` of a bucket denial. So the error
  *   is swallowed and reported through {@link
  *   RedisTokenBucketStrategyOptions.onReservationError}, which exists for
  *   exactly this case: a fault the caller has no other way to observe.
@@ -58,7 +62,8 @@ import type { RedisTokenBucket } from "./RedisTokenBucket.js";
  *   `cancel()`. The caller invoked that transition and can catch it, so the
  *   error simply propagates; there is no hook and nothing is swallowed. The
  *   bucket token is settled either way — refunded on a commit failure and on
- *   every cancel — before the error escapes. The inner's reservation may be
+ *   every cancel, when the bucket confirmed the debit — before the error
+ *   escapes. The inner's reservation may be
  *   leaked, which is the inner's contract to describe, not this strategy's.
  *
  * That split is the whole rule: the hook covers the reservation the caller
@@ -165,6 +170,10 @@ export class RedisTokenBucketStrategy<ContextT> {
       return undefined;
     }
 
+    // Refund only a token that Redis confirmed it took. A grant that failed
+    // open has an unknown debit, and refunding it could add a token.
+    const { debited } = result;
+
     // Both gates granted. Return a reservation that settles the bucket token
     // and otherwise gets out of the way: the caller owns these transitions, so
     // an error from the inner propagates to whoever called commit or cancel.
@@ -174,11 +183,12 @@ export class RedisTokenBucketStrategy<ContextT> {
           await reservation.commit();
         } catch (error) {
           // The inner is in an indeterminate state per the
-          // AllotmentReservation contract, but the bucket token is purely ours
-          // and refunding is always safe (the bucket is rate-based, not
-          // absolute), so give it back before the error escapes.
+          // AllotmentReservation contract, but a debited bucket token is
+          // purely ours and refunding it is always safe (the bucket is
+          // rate-based, not absolute), so give it back before the error
+          // escapes.
           // `#refundQuietly` never throws, so it cannot shadow `error`.
-          await this.#refundQuietly(key);
+          if (debited) await this.#refundQuietly(key);
           throw error;
         }
       },
@@ -190,7 +200,7 @@ export class RedisTokenBucketStrategy<ContextT> {
         try {
           await reservation.cancel();
         } finally {
-          await this.#refundQuietly(key);
+          if (debited) await this.#refundQuietly(key);
         }
       },
     );

@@ -45,8 +45,11 @@ export type PartitionConfig = {
  *
  * 1. Each partition gets `floor(globalLimit * percent)` slots.
  * 2. The slots left over go one each to the partitions with the largest
- *    fractional remainders. A tie goes to the partition declared first in
- *    `partitions`, so declare partitions in priority order.
+ *    fractional remainders. A tie goes to the partition that comes first in
+ *    the enumeration order of `partitions`. That is insertion order, except
+ *    that integer-like names such as `"1"` come first, in ascending numeric
+ *    order. So list partitions in priority order, and do not give them
+ *    integer-like names.
  *
  * So the limitsAtGlobalSaturation never sum to more than the global limit, and
  * a partition's share can be 0. With 60%/20%/20% partitions, a global limit of
@@ -108,7 +111,10 @@ export class PartitionedStrategy<
     PartitionName,
     Partition<PartitionName>
   >;
-  /** The known partitions in declaration order, which is the tie-break order. */
+  /**
+   * The known partitions in the enumeration order of `partitions`, which is
+   * the tie-break order of {@link apportionGlobalLimit}.
+   */
   private readonly orderedPartitions: readonly Partition<PartitionName>[];
   private readonly unknownPartition: Partition<"unknown">;
   private readonly partitionResolver: (
@@ -281,10 +287,17 @@ export function apportionGlobalLimit(
     return floors;
   }
 
+  // Remainders are compared as whole multiples of QUOTA_EPSILON, so two
+  // remainders that are equal except for floating-point error tie, and the
+  // tie goes to the lower index. An epsilon inside the comparator would not
+  // be transitive.
   const winners = new Set(
     quotas
-      .map((quota, index) => ({ index, remainder: quota - floors[index]! }))
-      .sort((a, b) => b.remainder - a.remainder || a.index - b.index)
+      .map((quota, index) => ({
+        index,
+        remainderKey: Math.round((quota - floors[index]!) / QUOTA_EPSILON),
+      }))
+      .sort((a, b) => b.remainderKey - a.remainderKey || a.index - b.index)
       .slice(0, leftover)
       .map(({ index }) => index),
   );

@@ -25,6 +25,10 @@ export interface AdaptiveLimit {
    * @param didDrop Whether the request was dropped (timeout or rejection)
    * @param operationName Optional name identifying the type of operation,
    *   used by group-aware limits to distinguish heterogeneous workloads.
+   * @param weight Optional amount of work that the request represented,
+   *   relative to a request of weight 1: for example, the number of items in
+   *   a batch call. Undefined when the caller gave no weight. A limit can use
+   *   it to normalize the sample. The built-in limits ignore it.
    */
   addSample(
     startTime: number,
@@ -32,6 +36,7 @@ export interface AdaptiveLimit {
     inflight: number,
     didDrop: boolean,
     operationName?: string,
+    weight?: number,
   ): void;
 
   /**
