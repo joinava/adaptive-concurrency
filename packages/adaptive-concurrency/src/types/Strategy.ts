@@ -171,6 +171,12 @@ export type AllotmentUnavailableStrategy<ContextT> = {
   /**
    * Called whenever any allotment is released (success, ignore, or drop).
    * Blocking strategies use this to wake queued waiters.
+   *
+   * Also called when an acquire attempt ends without an allotment while
+   * another attempt failed during it. The first attempt may have held a
+   * reservation that it then cancelled, and the other attempt may have
+   * failed because of it, so capacity may be free with no release to
+   * announce it.
    */
   onAllotmentReleased(): MaybePromise<void>;
 

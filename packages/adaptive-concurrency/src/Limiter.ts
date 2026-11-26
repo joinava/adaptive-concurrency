@@ -294,6 +294,13 @@ export class Limiter<
    * `interval(0)`. This errs on the side of caution and is acceptable.
    */
   private probeFailures = 0;
+
+  /**
+   * How many acquire attempts have ended without an allotment. An attempt
+   * compares it at its start and end to learn whether another attempt
+   * failed while it ran. See {@link tryAcquireCore}.
+   */
+  private failedAttempts = 0;
   private probeTimerHandle: AnyTimerHandle | undefined;
   private disposed = false;
   private readonly unsubscribeFromLimit: () => void;
@@ -557,7 +564,53 @@ export class Limiter<
     return { ok: true, value: allotment };
   }
 
+  /**
+   * Runs one acquire attempt. When the attempt ends without an allotment,
+   * and another attempt failed while this one was running, it tells the
+   * rejection strategy that capacity may be free.
+   *
+   * An attempt that ends without an allotment may have reserved capacity and
+   * then cancelled it: the limiter cancels when `clock()` or
+   * `operationNameFor()` throws, and a composed strategy (such as a Redis
+   * bucket over a semaphore) cancels its inner reservation when its own gate
+   * denies. While the reservation was held, other attempts could fail
+   * because of it, among them a queued waiter's retry. A cancel is not a
+   * release, so nothing else would wake that waiter. The limiter cannot see
+   * a cancel inside a composed strategy, so it uses an overlapping failure
+   * as the sign that a waiter may need another try.
+   */
   private async tryAcquireCore(
+    ctx: Context,
+    acquireStart: number,
+  ): Promise<LimitAllotment | undefined> {
+    const failedAttemptsAtStart = this.failedAttempts;
+    let allotment: LimitAllotment | undefined;
+    try {
+      allotment = await this.attemptAcquire(ctx, acquireStart);
+    } catch (err) {
+      this.onAttemptFailed(failedAttemptsAtStart);
+      throw err;
+    }
+    if (!allotment) {
+      this.onAttemptFailed(failedAttemptsAtStart);
+    }
+    return allotment;
+  }
+
+  private onAttemptFailed(failedAttemptsAtStart: number): void {
+    const overlappedAnotherFailure =
+      this.failedAttempts !== failedAttemptsAtStart;
+    this.failedAttempts++;
+    if (overlappedAnotherFailure && this.rejectionStrategy) {
+      // Not awaited, so this attempt's caller does not wait for a drain. The
+      // call's synchronous part still runs now, so a drain in progress sees
+      // the notice before this attempt's result reaches it.
+      const rejectionStrategy = this.rejectionStrategy;
+      void fireAndForget(() => rejectionStrategy.onAllotmentReleased());
+    }
+  }
+
+  private async attemptAcquire(
     ctx: Context,
     acquireStart: number,
   ): Promise<LimitAllotment | undefined> {
@@ -581,10 +634,10 @@ export class Limiter<
     // during reserve (e.g. the bucket token) — something `onAllotmentReleased`
     // couldn't do because that hook is semantically "completed allotment", not
     // "abandoned reservation".
-    let operationStartTime: number;
+    let preCommitTime: number;
     let operationName: string | undefined;
     try {
-      operationStartTime = this.clock();
+      preCommitTime = this.clock();
       operationName = this.operationNameFor?.(ctx);
     } catch (err) {
       await fireAndForget(() => reservation.cancel());
@@ -597,6 +650,13 @@ export class Limiter<
     // touching `_inflight` or building an allotment, leaving the strategy
     // responsible for its own cleanup.
     await reservation.commit();
+
+    // The operation starts once the commit is done, so the RTT leaves out
+    // the commit's time (which can be long for an async commit). If the clock
+    // throws here, the start is unknown: the allotment is still granted, but
+    // no success sample or acquire time is recorded for it, since any stand-in
+    // would include the commit's time.
+    const operationStartTime = this.safeReadClockWithFallback(undefined);
 
     void fireAndForget(() => this.acquireSucceededCounter.add(1));
     void fireAndForget(() => {
@@ -649,8 +709,9 @@ export class Limiter<
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          // if clock threw, preventing us from getting an rtt, we don't add a sample.
-          if (endTime !== undefined) {
+          // If either clock read threw, there is no RTT, so we don't add a
+          // sample.
+          if (endTime !== undefined && operationStartTime !== undefined) {
             if (this.stallLog?.touched(operationStartTime, endTime)) {
               // An event-loop stall delayed this request's start or end, so
               // its RTT says nothing about the downstream. Count it, but
@@ -708,8 +769,13 @@ export class Limiter<
         if (releaseStarted) return;
         releaseStarted = true;
 
-        const endTime = this.safeReadClockWithFallback(operationStartTime);
-        const rtt = endTime - operationStartTime;
+        // A drop is always recorded, since loss-based limits react to the
+        // drop itself. When a clock read failed, the RTT is recorded as 0.
+        const endTime = this.safeReadClockWithFallback(
+          operationStartTime ?? preCommitTime,
+        );
+        const startTime = operationStartTime ?? endTime;
+        const rtt = endTime - startTime;
         this._inflight--;
         void fireAndForget(() => {
           this.droppedCounter.add(1, incrementTags);
@@ -726,7 +792,7 @@ export class Limiter<
         } catch {}
         try {
           this.limitAlgorithm.addSample(
-            operationStartTime,
+            startTime,
             rtt,
             currentInflight,
             true,
