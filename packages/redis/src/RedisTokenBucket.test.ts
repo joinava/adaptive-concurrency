@@ -162,7 +162,10 @@ describe("RedisTokenBucket", () => {
       });
 
       for (let i = 0; i < 4; i++) {
-        assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+        assert.deepEqual(await bucket.tryAcquire("k"), {
+          acquired: true,
+          debited: true,
+        });
       }
       assert.deepEqual(await bucket.tryAcquire("k"), {
         acquired: false,
@@ -223,7 +226,10 @@ describe("RedisTokenBucket", () => {
 
       // One token's worth of time elapses -> exactly one more grant.
       now = 250;
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
       assert.deepEqual(await bucket.tryAcquire("k"), {
         acquired: false,
         waitMs: 250,
@@ -264,7 +270,10 @@ describe("RedisTokenBucket", () => {
       // Idle for many refill intervals; bucket should refill to at most 3.
       now = 1_000_000;
       for (let i = 0; i < 3; i++) {
-        assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+        assert.deepEqual(await bucket.tryAcquire("k"), {
+          acquired: true,
+          debited: true,
+        });
       }
       assert.equal((await bucket.tryAcquire("k")).acquired, false);
     });
@@ -280,13 +289,19 @@ describe("RedisTokenBucket", () => {
         clock: () => 0, // no natural refill within the test
       });
 
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
       assert.equal((await bucket.tryAcquire("k")).acquired, false);
 
       await bucket.refund("k");
 
       // The refunded token is available again without any time passing.
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
     });
 
     it("never exceeds maxTokens when refunding a full bucket", async () => {
@@ -307,8 +322,14 @@ describe("RedisTokenBucket", () => {
       assert.equal(tokens, 2);
 
       // Capacity is exactly maxTokens, proving no over-refund leaked through.
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
       assert.equal((await bucket.tryAcquire("k")).acquired, false);
     });
 
@@ -382,13 +403,19 @@ describe("RedisTokenBucket", () => {
         clock: () => 0,
       });
 
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
       assert.equal(backing.scriptLoadCalls, 1);
 
       backing.flushScripts(); // Redis forgot the script.
 
       // The bucket should transparently reload and still succeed.
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: true,
+      });
       assert.equal(backing.scriptLoadCalls, 2);
     });
   });
@@ -408,7 +435,10 @@ describe("RedisTokenBucket", () => {
         },
       );
 
-      assert.deepEqual(await bucket.tryAcquire("tenant-9"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("tenant-9"), {
+        acquired: true,
+        debited: false,
+      });
       assert.equal(errors.length, 1);
       assert.deepEqual(errors[0], {
         keyPrefix: "rl",
@@ -427,8 +457,14 @@ describe("RedisTokenBucket", () => {
         onError: (info) => errors.push(info.error),
       });
 
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: false,
+      });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: false,
+      });
       // A failed load resets the cached SHA promise, so each attempt re-loads.
       assert.equal(client.scriptLoadCalls, 2);
       assert.equal(errors.length, 2);
@@ -470,7 +506,10 @@ describe("RedisTokenBucket", () => {
         },
       );
 
-      assert.deepEqual(await bucket.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await bucket.tryAcquire("k"), {
+        acquired: true,
+        debited: false,
+      });
       // tryAcquire resolved without waiting on the still-pending callback.
       assert.equal(callbackSettled, false);
 
@@ -490,7 +529,10 @@ describe("RedisTokenBucket", () => {
           },
         },
       );
-      assert.deepEqual(await throwing.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await throwing.tryAcquire("k"), {
+        acquired: true,
+        debited: false,
+      });
 
       const rejecting = new RedisTokenBucket(
         makeFakeClient({ failEvalSha: new Error("redis down") }),
@@ -501,7 +543,10 @@ describe("RedisTokenBucket", () => {
           onError: () => Promise.reject(new Error("async observer blew up")),
         },
       );
-      assert.deepEqual(await rejecting.tryAcquire("k"), { acquired: true });
+      assert.deepEqual(await rejecting.tryAcquire("k"), {
+        acquired: true,
+        debited: false,
+      });
     });
   });
 });

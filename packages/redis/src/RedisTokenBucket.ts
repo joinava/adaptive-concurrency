@@ -165,7 +165,18 @@ export type RedisTokenBucketConfig = {
 };
 
 export type AcquireResult =
-  | { acquired: true }
+  | {
+      acquired: true;
+      /**
+       * Whether Redis confirmed that it took a token. `false` means the bucket
+       * failed open on a Redis error. The script may or may not have run, so
+       * the bucket does not know whether a token was taken. Refund only a
+       * debited token: refunding an unknown one can add a token the bucket
+       * never lost, while skipping it loses at most one token, which the
+       * next refill restores.
+       */
+      debited: boolean;
+    }
   | { acquired: false; waitMs: number };
 
 export class RedisTokenBucket {
@@ -200,7 +211,8 @@ export class RedisTokenBucket {
 
   /**
    * Attempt to acquire a token for the given key.
-   * If Redis is unavailable, degrades gracefully by allowing the request.
+   * If Redis is unavailable, degrades gracefully by allowing the request, with
+   * `debited: false`.
    */
   async tryAcquire(key: string): Promise<AcquireResult> {
     const redisKey = `${this.#config.keyPrefix}:${key}`;
@@ -216,21 +228,23 @@ export class RedisTokenBucket {
       });
 
       if (result[0] === 1) {
-        return { acquired: true };
+        return { acquired: true, debited: true };
       }
 
       return { acquired: false, waitMs: result[1] ?? 0 };
     } catch (error) {
       this.#fireOnError(key, error);
-      // Degrade gracefully: allow the request through.
-      return { acquired: true };
+      // Degrade gracefully: allow the request through. The error does not say
+      // whether the script ran, so the debit is unknown.
+      return { acquired: true, debited: false };
     }
   }
 
   /**
    * Refund a previously-acquired token back to the bucket. Use this when a
    * downstream gate rejects a request after `tryAcquire` already consumed a
-   * token, so the configured rate is preserved.
+   * token, so the configured rate is preserved. Refund only after a
+   * `tryAcquire` that returned `debited: true`.
    *
    * If Redis is unavailable, degrades gracefully: the refund is silently
    * dropped (the token will refill naturally over `refillIntervalMs`).
