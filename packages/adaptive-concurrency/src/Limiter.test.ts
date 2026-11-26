@@ -410,6 +410,67 @@ describe("Limiter (default SemaphoreStrategy)", () => {
     assert.deepEqual(acquireTimes, [50]);
   });
 
+  it("records no success sample when the clock throws right after the commit, but still records a drop", async () => {
+    let now = 100;
+    let throwOnRead: number | undefined;
+    let reads = 0;
+    const samples: Array<{ startTime: number; rtt: number; didDrop: boolean }> =
+      [];
+    const acquireTimes: number[] = [];
+
+    const limit: AdaptiveLimit = {
+      get currentLimit() {
+        return 2;
+      },
+      subscribe() {
+        return () => {};
+      },
+      addSample(startTime, rtt, _inflight, didDrop) {
+        samples.push({ startTime, rtt, didDrop });
+      },
+    };
+
+    const limiter = new Limiter<void>({
+      limit,
+      clock: () => {
+        reads++;
+        if (reads === throwOnRead) throw new Error("clock failed");
+        return now;
+      },
+      metricRegistry: {
+        counter: () => ({ add() {} }),
+        gauge: () => ({ record() {} }),
+        distribution: (id, tags) => ({
+          addSample(value) {
+            if (
+              id === MetricIds.ACQUIRE_TIME_NAME &&
+              tags?.status === "success"
+            ) {
+              acquireTimes.push(value);
+            }
+          },
+        }),
+      },
+    });
+
+    // Reads per acquire: the acquire start, the read before the commit, then
+    // the read after the commit (the 3rd), which throws.
+    reads = 0;
+    throwOnRead = 3;
+    const ok = await acquireOk(limiter, {});
+    reads = 0;
+    throwOnRead = 3;
+    const dropped = await acquireOk(limiter, {});
+    throwOnRead = undefined;
+
+    now = 130;
+    await ok.releaseAndRecordSuccess();
+    await dropped.releaseAndRecordDropped();
+
+    assert.deepEqual(acquireTimes, []);
+    assert.deepEqual(samples, [{ startTime: 130, rtt: 0, didDrop: true }]);
+  });
+
   describe("release weight", () => {
     const recordWeights = () => {
       const weights: Array<{ didDrop: boolean; weight: number | undefined }> =

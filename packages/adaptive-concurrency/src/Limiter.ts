@@ -652,16 +652,19 @@ export class Limiter<
     await reservation.commit();
 
     // The operation starts once the commit is done, so the RTT leaves out
-    // the commit's time (which can be long for an async commit). The clock
-    // was read once above, so a clock that throws here falls back to that
-    // reading instead of stranding a committed reservation.
-    const operationStartTime = this.safeReadClockWithFallback(preCommitTime);
+    // the commit's time (which can be long for an async commit). If the clock
+    // throws here, the start is unknown: the allotment is still granted, but
+    // no success sample or acquire time is recorded for it, since any stand-in
+    // would include the commit's time.
+    const operationStartTime = this.safeReadClockWithFallback(undefined);
 
     void fireAndForget(() => this.acquireSucceededCounter.add(1));
     void fireAndForget(() => {
-      this.acquireTimeOnSuccessDistribution.addSample(
-        operationStartTime - acquireStart,
-      );
+      if (operationStartTime !== undefined) {
+        this.acquireTimeOnSuccessDistribution.addSample(
+          operationStartTime - acquireStart,
+        );
+      }
     });
 
     const currentInflight = ++this._inflight;
@@ -706,8 +709,9 @@ export class Limiter<
           await this.acquireStrategy.onAllotmentReleased(ctx);
         } catch {}
         try {
-          // if clock threw, preventing us from getting an rtt, we don't add a sample.
-          if (endTime !== undefined) {
+          // If either clock read threw, there is no RTT, so we don't add a
+          // sample.
+          if (endTime !== undefined && operationStartTime !== undefined) {
             if (this.stallLog?.touched(operationStartTime, endTime)) {
               // An event-loop stall delayed this request's start or end, so
               // its RTT says nothing about the downstream. Count it, but
@@ -765,8 +769,13 @@ export class Limiter<
         if (releaseStarted) return;
         releaseStarted = true;
 
-        const endTime = this.safeReadClockWithFallback(operationStartTime);
-        const rtt = endTime - operationStartTime;
+        // A drop is always recorded, since loss-based limits react to the
+        // drop itself. When a clock read failed, the RTT is recorded as 0.
+        const endTime = this.safeReadClockWithFallback(
+          operationStartTime ?? preCommitTime,
+        );
+        const startTime = operationStartTime ?? endTime;
+        const rtt = endTime - startTime;
         this._inflight--;
         void fireAndForget(() => {
           this.droppedCounter.add(1, incrementTags);
@@ -783,7 +792,7 @@ export class Limiter<
         } catch {}
         try {
           this.limitAlgorithm.addSample(
-            operationStartTime,
+            startTime,
             rtt,
             currentInflight,
             true,

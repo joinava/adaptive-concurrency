@@ -63,6 +63,9 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
   takes. Before, `Limiter` started the operation's clock before the commit,
   so a slow async commit inflated every RTT. The acquire-time metric now
   includes the commit, and stall detection checks the operation's real start.
+  If the clock throws when it is read after the commit, the allotment records
+  no success sample and no acquire time; a drop is still recorded, with an RTT
+  of 0.
 - A queued waiter could wait until its backlog timeout although capacity was
   free. An acquire attempt can reserve capacity and then cancel it: `Limiter`
   cancels when `clock()` or `operationNameFor()` throws, and
