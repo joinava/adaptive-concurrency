@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   AllotmentReservation,
+  BlockingBacklogRejection,
   isAllotmentUnavailableError,
   Limiter,
+  LinkedWaiterQueue,
   PartitionedStrategy,
   SemaphoreStrategy,
   SettableLimit,
@@ -797,6 +799,75 @@ describe("RedisTokenBucketStrategy", () => {
         "the local semaphore still has its permit available for the next bucket grant",
       );
       assert.equal(client.evalShaCalls.length, 2);
+    });
+
+    it("wakes a queued waiter when a bucket denial frees the semaphore slot", async () => {
+      // Each acquire-script call waits until the test answers it. Refunds
+      // are answered at once.
+      const answers: Array<(response: AcquireResponse) => void> = [];
+      const client: RedisTokenBucketClient = {
+        async scriptLoad() {
+          return "fake-sha";
+        },
+        async evalSha(_sha, args) {
+          if (args.arguments.length === 2) return 1; // refund
+          return new Promise<AcquireResponse>((resolve) => {
+            answers.push(resolve);
+          });
+        },
+      };
+      const bucket = new RedisTokenBucket(client, {
+        keyPrefix: "test",
+        maxTokens: 100,
+        refillIntervalMs: 1000,
+      });
+      const limiter = new Limiter<string>({
+        limit: new SettableLimit(1),
+        acquireStrategy: new RedisTokenBucketStrategy<string>({
+          bucket,
+          inner: new SemaphoreStrategy(1),
+          keyResolver: (tenant) => tenant,
+        }),
+        // A backlog of one: B fills it, so A's denied acquire does not queue
+        // (and so does not start a drain of its own).
+        allotmentUnavailableStrategy: new BlockingBacklogRejection<
+          string,
+          object
+        >({
+          backlogSize: 1,
+          backlogTimeout: 200,
+          enqueueOptions: { direction: "back" },
+          queue: new LinkedWaiterQueue(),
+        }),
+      });
+      const flush = async () => {
+        for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+      };
+
+      // A reserves the only semaphore slot and waits on its bucket.
+      const a = limiter.acquire({ context: "tenant-a" });
+      await flush();
+      assert.equal(answers.length, 1);
+
+      // B finds the slot reserved and queues; its first retry fails too.
+      const b = limiter.acquire({ context: "tenant-b" });
+      await flush();
+
+      // A's bucket denies, so the strategy cancels A's semaphore reservation.
+      answers.shift()!([0, 100]);
+      await assertUnavailable(a);
+      await flush();
+
+      // B is retried, reaches its own bucket, and gets the slot.
+      assert.equal(
+        answers.length,
+        1,
+        "B was not retried after A freed the slot",
+      );
+      answers.shift()!([1, 0]);
+      const result = await b;
+      assert.ok(result.ok, "B should get the slot that A's denial freed");
+      await result.value.releaseAndRecordSuccess();
     });
   });
 

@@ -57,6 +57,22 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
   limit algorithm as a new optional last argument of `AdaptiveLimit.addSample`.
   The built-in limits ignore it, and `WindowedLimit` does not forward it.
 
+### Fixed
+
+- The RTT sample left out the time that `AllotmentReservation.commit()`
+  takes. Before, `Limiter` started the operation's clock before the commit,
+  so a slow async commit inflated every RTT. The acquire-time metric now
+  includes the commit, and stall detection checks the operation's real start.
+- A queued waiter could wait until its backlog timeout although capacity was
+  free. An acquire attempt can reserve capacity and then cancel it: `Limiter`
+  cancels when `clock()` or `operationNameFor()` throws, and
+  `RedisTokenBucketStrategy` cancels its inner reservation when the bucket
+  denies. A waiter's retry that failed against that reservation was not
+  tried again, because a cancel is not a release. Now, when an attempt ends
+  without an allotment and another attempt failed while it ran, `Limiter`
+  calls the rejection strategy's `onAllotmentReleased()`, so a blocking
+  backlog retries its head.
+
 ## [0.14.0] - 2026-09-16
 
 ### Breaking

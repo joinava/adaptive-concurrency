@@ -31,6 +31,7 @@ import type {
 import { MetricIds } from "./MetricRegistry.js";
 import { AdaptiveTimeoutError, isAdaptiveTimeoutError } from "./RunResult.js";
 import { LinkedWaiterQueue } from "./utils/LinkedWaiterQueue.js";
+import { SemaphoreStrategy } from "./limiter/acquire-strategies/SemaphoreStrategy.js";
 
 /** Acquires, and asserts that the limiter gave an allotment. */
 async function acquireOk<ContextT>(
@@ -346,6 +347,67 @@ describe("Limiter (default SemaphoreStrategy)", () => {
       inflight: 1,
       didDrop: false,
     });
+  });
+
+  it("leaves the time that reservation.commit() takes out of the RTT", async () => {
+    let now = 100;
+    const samples: Array<{ startTime: number; rtt: number }> = [];
+    const acquireTimes: number[] = [];
+
+    const limit: AdaptiveLimit = {
+      get currentLimit() {
+        return 1;
+      },
+      subscribe() {
+        return () => {};
+      },
+      addSample(startTime, rtt) {
+        samples.push({ startTime, rtt });
+      },
+    };
+
+    // An async commit that takes 50ms, as a commit that talks to a remote
+    // store might.
+    const acquireStrategy: AcquireStrategy<void> = {
+      tryReserveAllotment() {
+        return new AllotmentReservation(
+          async () => {
+            await Promise.resolve();
+            now += 50;
+          },
+          () => {},
+        );
+      },
+      onAllotmentReleased() {},
+    };
+
+    const limiter = new Limiter<void>({
+      limit,
+      acquireStrategy,
+      clock: () => now,
+      metricRegistry: {
+        counter: () => ({ add() {} }),
+        gauge: () => ({ record() {} }),
+        distribution: (id, tags) => ({
+          addSample(value) {
+            if (
+              id === MetricIds.ACQUIRE_TIME_NAME &&
+              tags?.status === "success"
+            ) {
+              acquireTimes.push(value);
+            }
+          },
+        }),
+      },
+    });
+
+    const allotment = await acquireOk(limiter, {});
+    now += 30;
+    await allotment.releaseAndRecordSuccess();
+
+    assert.deepEqual(samples, [{ startTime: 150, rtt: 30 }]);
+    // The acquire time does include the commit: the caller waited for it.
+    assert.deepEqual(acquireTimes, [50]);
   });
 
   describe("release weight", () => {
@@ -1872,6 +1934,146 @@ describe("Limiter (default SemaphoreStrategy)", () => {
         "abort-after-retry-acquired should record an ignored call",
       );
     });
+  });
+});
+
+describe("Limiter wakes queued waiters when a failed attempt frees capacity", () => {
+  /**
+   * An outer gate over an inner strategy, shaped like
+   * `RedisTokenBucketStrategy`: the inner reserves first, then the outer
+   * gate decides, and a denial cancels the inner reservation. The test
+   * resolves each gate decision by hand.
+   */
+  function makeGatedStrategy(inner: AcquireStrategy<string>) {
+    const pending: Array<(grant: boolean) => void> = [];
+    const strategy: AcquireStrategy<string> = {
+      async tryReserveAllotment(ctx, state) {
+        const reservation = await inner.tryReserveAllotment(ctx, state);
+        if (!reservation) return undefined;
+        const grant = await new Promise<boolean>((resolve) => {
+          pending.push(resolve);
+        });
+        if (!grant) {
+          await reservation.cancel();
+          return undefined;
+        }
+        return reservation;
+      },
+      onAllotmentReleased: (ctx) => inner.onAllotmentReleased(ctx),
+      onLimitChanged: (oldLimit, newLimit) =>
+        inner.onLimitChanged?.(oldLimit, newLimit),
+    };
+    return { strategy, pending };
+  }
+
+  async function flush() {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  }
+
+  // When the denied caller queues itself, its enqueue starts a drain, which
+  // retries the waiter. So the stall shows only when the denied caller does
+  // not queue: the backlog is full, or the attempt threw.
+  it("retries a queued waiter when an outer gate's denial frees the slot and the backlog is full", async () => {
+    const { strategy, pending } = makeGatedStrategy(new SemaphoreStrategy(1));
+    const limiter = new Limiter<string>({
+      limit: new FixedLimit(1),
+      acquireStrategy: strategy,
+      allotmentUnavailableStrategy: makeFifoBlockingRejection({
+        backlogSize: 1,
+        backlogTimeout: 200,
+      }),
+    });
+
+    // A takes the only inner slot and waits on the outer gate.
+    const a = limiter.acquire({ context: "a" });
+    await flush();
+    assert.equal(pending.length, 1);
+
+    // B finds the inner slot reserved, fills the backlog, and its first
+    // drain retry fails for the same reason.
+    const b = limiter.acquire({ context: "b" });
+    await flush();
+
+    // The outer gate denies A, which cancels A's inner reservation and frees
+    // the slot. The backlog is full, so A does not queue, and nothing is
+    // released, so only the limiter can wake B.
+    pending.shift()!(false);
+    await assertUnavailable(a);
+    await flush();
+
+    assert.equal(pending.length, 1, "B was not retried after A freed the slot");
+    pending.shift()!(true);
+    const result = await b;
+    assert.ok(result.ok, "B should get the freed slot");
+    await result.value.releaseAndRecordSuccess();
+  });
+
+  it("retries a queued waiter when a throwing clock cancels a reservation", async () => {
+    const { strategy, pending } = makeGatedStrategy(new SemaphoreStrategy(1));
+    let clockThrows = false;
+    const limiter = new Limiter<string>({
+      limit: new FixedLimit(1),
+      acquireStrategy: strategy,
+      clock: () => {
+        if (clockThrows) {
+          clockThrows = false;
+          throw new Error("clock failed");
+        }
+        return performance.now();
+      },
+      allotmentUnavailableStrategy: makeFifoBlockingRejection({
+        backlogTimeout: 200,
+      }),
+    });
+
+    const a = limiter.acquire({ context: "a" });
+    await flush();
+    const b = limiter.acquire({ context: "b" });
+    await flush();
+
+    // The gate grants A, but the limiter's clock throws before the commit,
+    // so the limiter cancels A's reservation. A rejects and never queues.
+    clockThrows = true;
+    pending.shift()!(true);
+    await assert.rejects(a, /clock failed/);
+    await flush();
+
+    assert.equal(pending.length, 1, "B was not retried after A freed the slot");
+    pending.shift()!(true);
+    const result = await b;
+    assert.ok(result.ok, "B should get the freed slot");
+    await result.value.releaseAndRecordSuccess();
+  });
+
+  it("does not loop when failed attempts overlap and nothing frees capacity", async () => {
+    let attempts = 0;
+    const limiter = new Limiter<void>({
+      limit: new FixedLimit(1),
+      acquireStrategy: {
+        async tryReserveAllotment() {
+          attempts++;
+          await Promise.resolve();
+          return undefined;
+        },
+        onAllotmentReleased() {},
+      },
+      allotmentUnavailableStrategy: makeFifoBlockingRejection({
+        backlogTimeout: 20,
+      }),
+    });
+
+    const results = await Promise.all([
+      limiter.acquire(),
+      limiter.acquire(),
+      limiter.acquire(),
+    ]);
+    for (const result of results) assert.equal(result.ok, false);
+    // Each acquire makes a first attempt, and each enqueue or overlapping
+    // failure can start a drain retry. The count stays small and fixed.
+    assert.ok(
+      attempts < 20,
+      `expected a bounded number of attempts, saw ${attempts}`,
+    );
   });
 });
 
