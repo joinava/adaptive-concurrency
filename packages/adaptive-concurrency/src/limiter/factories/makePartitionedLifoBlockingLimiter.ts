@@ -54,6 +54,7 @@ export function makePartitionedLifoBlockingLimiter<
         backlogTimeout: options.backlogTimeout ?? 1_000,
         enqueueOptions: { direction: "front" },
         queue: new LinkedWaiterQueue<Waiter<ContextT>>(),
+        capacityGroup: options.partitionResolver,
       }),
     }),
   });

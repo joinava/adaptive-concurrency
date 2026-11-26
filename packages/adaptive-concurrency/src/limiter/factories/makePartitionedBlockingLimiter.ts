@@ -54,6 +54,7 @@ export function makePartitionedBlockingLimiter<
         backlogTimeout: options.backlogTimeout ?? MAX_TIMEOUT,
         enqueueOptions: { direction: "back" },
         queue: new LinkedWaiterQueue<Waiter<ContextT>>(),
+        capacityGroup: options.partitionResolver,
       }),
     }),
   });

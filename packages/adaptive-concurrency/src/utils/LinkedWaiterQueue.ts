@@ -78,6 +78,36 @@ export class LinkedWaiterQueue<T extends object> {
     };
   }
 
+  /**
+   * Returns the entry that comes after `handle` in drain order: the next
+   * entry in the same priority, or else the first entry of the next lower
+   * priority. Returns `undefined` if `handle` is the last entry or is not in
+   * the queue.
+   */
+  peekNext(handle: ItemHandle): { value: T; handle: ItemHandle } | undefined {
+    const node = this.nodes.get(handle);
+    if (!node) {
+      return undefined;
+    }
+    if (node.next) {
+      return { value: node.next.value, handle: node.next.handle };
+    }
+
+    let nextBucket: PriorityBucket<T> | undefined;
+    for (const bucket of this.buckets.values()) {
+      if (
+        bucket.priority < node.priority &&
+        bucket.head &&
+        (!nextBucket || bucket.priority > nextBucket.priority)
+      ) {
+        nextBucket = bucket;
+      }
+    }
+    return nextBucket?.head
+      ? { value: nextBucket.head.value, handle: nextBucket.head.handle }
+      : undefined;
+  }
+
   removeByHandle(handle: ItemHandle): boolean {
     const node = this.nodes.get(handle);
     if (!node) return false;

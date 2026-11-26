@@ -6,6 +6,7 @@ import { FixedLimit } from "../../limit/FixedLimit.js";
 import { SettableLimit } from "../../limit/SettableLimit.js";
 import type { AcquireResult, LimitAllotment } from "../../Limiter.js";
 import { Limiter } from "../../Limiter.js";
+import { PartitionedStrategy } from "../acquire-strategies/PartitionedStrategy.js";
 import type { Result } from "../../types/Strategy.js";
 import { LinkedWaiterQueue } from "../../utils/LinkedWaiterQueue.js";
 import {
@@ -738,6 +739,168 @@ describe("Blocking backlog rejection strategies", () => {
         await acquireOk(stablePromise),
         allotment,
         "stable waiter should be served",
+      );
+    });
+  });
+
+  describe("capacityGroup", () => {
+    function makeGroupedRejection<ContextT>(
+      capacityGroup: (context: ContextT) => unknown,
+      direction: "front" | "back" = "back",
+    ): BlockingBacklogRejection<ContextT, object> {
+      return new BlockingBacklogRejection<ContextT, object>({
+        backlogSize: Number.POSITIVE_INFINITY,
+        backlogTimeout: 1_000,
+        enqueueOptions: { direction },
+        queue: new LinkedWaiterQueue(),
+        capacityGroup,
+      });
+    }
+
+    /** Each partition may hold 1 allotment: burst "none", 50% of 2. */
+    function makePartitionedLimiter(
+      strategy: BlockingBacklogRejection<string, object>,
+    ): Limiter<string> {
+      return new Limiter<string>({
+        limit: new FixedLimit(2),
+        acquireStrategy: new PartitionedStrategy<string>({
+          initialLimit: 2,
+          partitionResolver: (ctx) => ctx,
+          partitions: {
+            a: { percent: 0.5, burstMode: { kind: "none" } },
+            b: { percent: 0.5, burstMode: { kind: "none" } },
+          },
+        }),
+        allotmentUnavailableStrategy: strategy,
+      });
+    }
+
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+    it("serves a later waiter in another partition when the head's partition is full", async () => {
+      const limiter = makePartitionedLimiter(makeGroupedRejection((ctx) => ctx));
+      const a1 = await acquireOk(limiter.acquire({ context: "a" }));
+      const b1 = await acquireOk(limiter.acquire({ context: "b" }));
+
+      const a2Waiting = limiter.acquire({ context: "a" });
+      await tick();
+      const b2Waiting = limiter.acquire({ context: "b" });
+      await tick();
+
+      await b1.releaseAndRecordSuccess();
+      const b2 = await acquireOk(b2Waiting);
+
+      await b2.releaseAndRecordSuccess();
+      await a1.releaseAndRecordSuccess();
+      const a2 = await acquireOk(a2Waiting);
+      await a2.releaseAndRecordSuccess();
+    });
+
+    it("keeps queue order within a partition", async () => {
+      const limiter = makePartitionedLimiter(makeGroupedRejection((ctx) => ctx));
+      const a1 = await acquireOk(limiter.acquire({ context: "a" }));
+      const b1 = await acquireOk(limiter.acquire({ context: "b" }));
+
+      const served: string[] = [];
+      const track = (name: string, promise: AcquireResult) =>
+        acquireOk(promise).then((allotment) => {
+          served.push(name);
+          return allotment;
+        });
+
+      const a2Waiting = track("a2", limiter.acquire({ context: "a" }));
+      await tick();
+      const b2Waiting = track("b2", limiter.acquire({ context: "b" }));
+      await tick();
+      const a3Waiting = track("a3", limiter.acquire({ context: "a" }));
+      await tick();
+
+      await a1.releaseAndRecordSuccess();
+      const a2 = await a2Waiting;
+      assert.deepEqual(served, ["a2"]);
+
+      await a2.releaseAndRecordSuccess();
+      const a3 = await a3Waiting;
+      assert.deepEqual(served, ["a2", "a3"]);
+
+      await b1.releaseAndRecordSuccess();
+      const b2 = await b2Waiting;
+      assert.deepEqual(served, ["a2", "a3", "b2"]);
+
+      await a3.releaseAndRecordSuccess();
+      await b2.releaseAndRecordSuccess();
+    });
+
+    it("makes at most one failed retry per group in a drain", async () => {
+      const allotment: LimitAllotment = {
+        async releaseAndRecordSuccess() {},
+        async releaseAndIgnore() {},
+        async releaseAndRecordDropped() {},
+      };
+      const strategy = makeGroupedRejection<{ group: string }>(
+        (ctx) => ctx.group,
+      );
+      // The "open" group has no room until the release below.
+      let openHasRoom = false;
+      const retries: string[] = [];
+      const enqueue = (group: string) =>
+        strategy.onAllotmentUnavailable({ group }, async () => {
+          retries.push(group);
+          return group === "open" && openHasRoom ? allotment : undefined;
+        });
+
+      void enqueue("full");
+      void enqueue("full");
+      void enqueue("full");
+      const open = enqueue("open");
+      await tick();
+      retries.length = 0;
+
+      openHasRoom = true;
+      await strategy.onAllotmentReleased();
+      assert.deepEqual(retries, ["full", "open"]);
+      assert.equal(await acquireOk(open), allotment);
+    });
+
+    it("works with LIFO order", async () => {
+      const limiter = makePartitionedLimiter(
+        makeGroupedRejection((ctx) => ctx, "front"),
+      );
+      const a1 = await acquireOk(limiter.acquire({ context: "a" }));
+      const b1 = await acquireOk(limiter.acquire({ context: "b" }));
+
+      const b2Waiting = limiter.acquire({ context: "b" });
+      await tick();
+      // LIFO: this joins last, so it is the head.
+      const a2Waiting = limiter.acquire({ context: "a" });
+      await tick();
+
+      await b1.releaseAndRecordSuccess();
+      const b2 = await acquireOk(b2Waiting);
+
+      await b2.releaseAndRecordSuccess();
+      await a1.releaseAndRecordSuccess();
+      const a2 = await acquireOk(a2Waiting);
+      await a2.releaseAndRecordSuccess();
+    });
+
+    it("throws when the queue has no peekNext", () => {
+      const queue = new LinkedWaiterQueue();
+      assert.throws(
+        () =>
+          new BlockingBacklogRejection<string, object>({
+            backlogSize: 10,
+            backlogTimeout: 1_000,
+            enqueueOptions: { direction: "back" },
+            queue: {
+              enqueue: (waiter, options) => queue.enqueue(waiter, options),
+              peekHead: () => queue.peekHead(),
+              removeByHandle: (handle) => queue.removeByHandle(handle),
+              size: () => queue.size(),
+            },
+            capacityGroup: (ctx) => ctx,
+          }),
+        /peekNext/,
       );
     });
   });

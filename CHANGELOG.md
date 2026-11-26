@@ -56,6 +56,24 @@ Pairs with `@adaptive-concurrency/redis` 0.4.0 and `@adaptive-concurrency/http`
   for example the number of items in a batch call. `Limiter` passes it to the
   limit algorithm as a new optional last argument of `AdaptiveLimit.addSample`.
   The built-in limits ignore it, and `WindowedLimit` does not forward it.
+- `BlockingBacklogRejection` takes a `capacityGroup` option, a function from a
+  waiter's context to the group of capacity it draws from, such as its
+  partition. With it, a failed retry no longer ends a backlog drain. The drain
+  skips later waiters in the same group and keeps retrying waiters in other
+  groups. Waiters in one group keep their queue order.
+- `WaiterQueue` has an optional `peekNext(handle)` method, which
+  `capacityGroup` needs. `LinkedWaiterQueue` implements it.
+
+### Fixed
+
+- `makePartitionedBlockingLimiter` and `makePartitionedLifoBlockingLimiter`
+  no longer let a waiter from a full partition block the backlog. Before, the
+  drain only retried the waiter at the head of the backlog. When that
+  waiter's partition was full, the drain stopped, and waiters behind it from
+  partitions with free capacity waited until they timed out. Both factories
+  now set `capacityGroup` to the partition resolver. If you combine
+  `PartitionedStrategy` and `BlockingBacklogRejection` yourself, set
+  `capacityGroup` to get the fix.
 
 ### Fixed
 

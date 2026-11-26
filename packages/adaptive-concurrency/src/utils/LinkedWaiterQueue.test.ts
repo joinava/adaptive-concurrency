@@ -124,6 +124,30 @@ describe("LinkedWaiterQueue", () => {
     assert.equal(queue.peekHead(), undefined);
   });
 
+  it("peekNext walks entries in drain order, across priorities", () => {
+    const queue = new LinkedWaiterQueue<TestWaiter>();
+    const low = queue.enqueue({ id: "low" }, { direction: "back", priority: -1 });
+    const highA = queue.enqueue({ id: "highA" }, { direction: "back", priority: 5 });
+    const mid = queue.enqueue({ id: "mid" }, { direction: "back" });
+    const highB = queue.enqueue({ id: "highB" }, { direction: "back", priority: 5 });
+
+    const order: string[] = [];
+    for (
+      let entry = queue.peekHead();
+      entry;
+      entry = queue.peekNext(entry.handle)
+    ) {
+      order.push(entry.value.id);
+    }
+    assert.deepEqual(order, ["highA", "highB", "mid", "low"]);
+
+    assert.equal(queue.peekNext(highB.handle)?.handle, mid.handle);
+    assert.equal(queue.peekNext(low.handle), undefined);
+
+    queue.removeByHandle(highA.handle);
+    assert.equal(queue.peekNext(highA.handle), undefined);
+  });
+
   it("serves higher-priority waiters first", () => {
     const queue = new LinkedWaiterQueue<TestWaiter>();
     const low = queue.enqueue(
